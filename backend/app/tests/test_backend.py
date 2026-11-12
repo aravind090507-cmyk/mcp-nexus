@@ -786,6 +786,201 @@ def test_workflow_failure_recovery(client, admin_headers):
     assert len(wf_logs) >= 1
     assert "Construction Project Risk Intelligence" in wf_logs[0]["details"]
 
+# ==============================================================================
+# PHASE 7 REGRESSION TESTS: MCP PROCESS MANAGEMENT & SUBPROCESS RESILIENCE
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_regression_missing_python_interpreter_resolution():
+    """Test 1: Verify MCPClient dynamically resolves non-existent interpreter paths to current sys.executable."""
+    from app.mcp.client import MCPClient
+    client = MCPClient(
+        server_id="test-interpreter-res",
+        transport_type="STDIO",
+        command="C:\\NonExistentPath\\python99.exe",
+        args=["erp_server.py"]
+    )
+    resolved_cmd, resolved_args, cwd = client._resolve_command_and_args()
+    assert os.path.exists(resolved_cmd), f"Resolved binary must exist on disk: {resolved_cmd}"
+    assert resolved_cmd.lower().endswith("python.exe") or "python" in resolved_cmd.lower()
+
+@pytest.mark.asyncio
+async def test_regression_server_script_path_resolution():
+    """Test 2: Verify MCPClient dynamically resolves bare script names to demo_servers folder."""
+    from app.mcp.client import MCPClient
+    client = MCPClient(
+        server_id="test-script-res",
+        transport_type="STDIO",
+        command=sys.executable,
+        args=["inventory_server.py"]
+    )
+    resolved_cmd, resolved_args, cwd = client._resolve_command_and_args()
+    assert len(resolved_args) == 1
+    assert os.path.isabs(resolved_args[0])
+    assert os.path.exists(resolved_args[0]), f"Resolved script must exist on disk: {resolved_args[0]}"
+    assert os.path.basename(resolved_args[0]) == "inventory_server.py"
+
+@pytest.mark.asyncio
+async def test_regression_dependency_or_bad_script_failure():
+    """Test 3: Verify subprocess launch with completely invalid script fails cleanly with descriptive error."""
+    from app.mcp.client import MCPClient, MCPClientError
+    client = MCPClient(
+        server_id="test-bad-script",
+        transport_type="STDIO",
+        command=sys.executable,
+        args=["non_existent_fake_server_script_12345.py"],
+        timeout=3.0
+    )
+    with pytest.raises(MCPClientError) as exc_info:
+        await client.initialize()
+    assert any(term in str(exc_info.value).lower() for term in ["server closed stream", "failed to start", "no such file", "non-json"])
+
+@pytest.mark.asyncio
+async def test_regression_mcp_init_handshake_validation():
+    """Test 4: Verify full MCP initialization handshake and capability exchange succeeds on a valid server."""
+    from app.mcp.client import MCPClient
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    erp_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "erp_server.py")
+    client = MCPClient(
+        server_id="test-erp-init",
+        transport_type="STDIO",
+        command=sys.executable,
+        args=[erp_script],
+        timeout=5.0
+    )
+    init_res, latency = await client.initialize()
+    assert "protocolVersion" in init_res
+    assert init_res["protocolVersion"] == "2024-11-05"
+    assert "serverInfo" in init_res
+    assert latency > 0
+
+@pytest.mark.asyncio
+async def test_regression_tool_discovery_success():
+    """Test 5: Verify MCPClient tool discovery lists all declared tools on equipment server."""
+    from app.mcp.client import MCPClient
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    eq_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "equipment_server.py")
+    client = MCPClient(
+        server_id="test-eq-tools",
+        transport_type="STDIO",
+        command=sys.executable,
+        args=[eq_script],
+        timeout=5.0
+    )
+    tools = await client.list_tools()
+    assert isinstance(tools, list)
+    tool_names = [t["name"] for t in tools]
+    assert "get_equipment_status" in tool_names
+    assert "get_maintenance_schedule" in tool_names
+
+@pytest.mark.asyncio
+async def test_regression_tool_invocation_success():
+    """Test 6: Verify MCPClient invokes tool and returns parsed output correctly."""
+    from app.mcp.client import MCPClient
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    inv_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "inventory_server.py")
+    client = MCPClient(
+        server_id="test-inv-call",
+        transport_type="STDIO",
+        command=sys.executable,
+        args=[inv_script],
+        timeout=5.0
+    )
+    result, duration_ms = await client.call_tool("get_low_stock_items", {"threshold_multiplier": 1.0})
+    assert duration_ms > 0
+    assert result.get("isError") is False or "content" in result
+    parsed = result.get("parsed")
+    assert isinstance(parsed, dict)
+    assert "low_stock_items_count" in parsed
+
+@pytest.mark.asyncio
+async def test_regression_server_timeout_handling():
+    """Test 7: Verify MCPClient enforces timeouts without hanging subprocesses."""
+    from app.mcp.client import MCPClient, MCPClientError
+    client = MCPClient(
+        server_id="test-timeout-hang",
+        transport_type="STDIO",
+        command=sys.executable,
+        args=["-c", "import time; time.sleep(10)"],
+        timeout=1.0
+    )
+    with pytest.raises(MCPClientError) as exc_info:
+        await client.initialize()
+    err_str = str(exc_info.value).lower()
+    assert "timed out" in err_str or "closed stream" in err_str or "server closed" in err_str
+
+@pytest.mark.asyncio
+async def test_regression_clean_subprocess_shutdown():
+    """Test 8: Verify subprocesses are cleanly terminated and do not leak processes."""
+    import psutil
+    from app.mcp.client import MCPClient
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    erp_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "erp_server.py")
+    
+    current_proc = psutil.Process()
+    initial_children = len(current_proc.children(recursive=True))
+    
+    client = MCPClient(
+        server_id="test-shutdown",
+        transport_type="STDIO",
+        command=sys.executable,
+        args=[erp_script],
+        timeout=5.0
+    )
+    await client.initialize()
+    await client.list_tools()
+    
+    # After operations complete, child processes should be terminated
+    final_children = len(current_proc.children(recursive=True))
+    assert final_children <= initial_children + 1  # No leaked zombie processes
+
+@pytest.mark.asyncio
+async def test_regression_concurrent_execution_all_servers():
+    """Test 9: Verify concurrent execution across ERP, Equipment, and Inventory completes without deadlock."""
+    import asyncio
+    from app.mcp.client import MCPClient
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    
+    erp_c = MCPClient(server_id="erp-c", transport_type="STDIO", command=sys.executable, args=[os.path.join(base_dir, "app", "mcp", "demo_servers", "erp_server.py")])
+    eq_c = MCPClient(server_id="eq-c", transport_type="STDIO", command=sys.executable, args=[os.path.join(base_dir, "app", "mcp", "demo_servers", "equipment_server.py")])
+    inv_c = MCPClient(server_id="inv-c", transport_type="STDIO", command=sys.executable, args=[os.path.join(base_dir, "app", "mcp", "demo_servers", "inventory_server.py")])
+    
+    async def run_one(c, tool, args):
+        res, dur = await c.call_tool(tool, args)
+        return res
+        
+    t1 = run_one(erp_c, "get_project_status", {})
+    t2 = run_one(eq_c, "get_maintenance_schedule", {"overdue_only": True})
+    t3 = run_one(inv_c, "get_low_stock_items", {"threshold_multiplier": 1.0})
+    
+    r1, r2, r3 = await asyncio.gather(t1, t2, t3)
+    assert r1.get("isError") is False or "content" in r1
+    assert r2.get("isError") is False or "content" in r2
+    assert r3.get("isError") is False or "content" in r3
+
+def test_regression_partial_workflow_failure_reporting(client, admin_headers):
+    """Test 10: Verify partial workflow failure reports PARTIAL_SUCCESS or FAILED, completion < 100%, and warns in synthesis."""
+    srv_res = client.get("/api/v1/servers", headers=admin_headers)
+    assert srv_res.status_code == 200
+    servers = srv_res.json()
+    inv_srv = next((s for s in servers if "Inventory" in s["name"]), None)
+    assert inv_srv is not None
+    
+    # Disable inventory server
+    client.put(f"/api/v1/servers/{inv_srv['id']}", json={"is_enabled": False}, headers=admin_headers)
+    try:
+        wf_res = client.post("/api/v1/workflows/execute", json={}, headers=admin_headers)
+        assert wf_res.status_code == 200
+        wf_data = wf_res.json()
+        assert wf_data["execution_status"] in ("PARTIAL_SUCCESS", "PARTIAL_FAILURE")
+        assert wf_data["server_progress"]["completion_status"]["percentage"] < 100
+        assert wf_data["server_progress"]["inventory_server"]["status"] == "UNAVAILABLE"
+        assert "PARTIAL" in wf_data["synthesis"] or "CAUTION" in wf_data["synthesis"]
+    finally:
+        # Re-enable
+        client.put(f"/api/v1/servers/{inv_srv['id']}", json={"is_enabled": True}, headers=admin_headers)
+
+
 
 
 

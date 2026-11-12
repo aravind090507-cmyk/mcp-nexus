@@ -1,5 +1,10 @@
 import sys
 import os
+import asyncio
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -77,6 +82,8 @@ def health():
 # Seed realistic enterprise data on first run
 @app.on_event("startup")
 async def startup_seed():
+    from app.mcp.client import MCPConnectionManager
+    MCPConnectionManager.reset_all_circuits()
     db = SessionLocal()
     try:
         # Schema migration check: Ensure dual-control columns exist

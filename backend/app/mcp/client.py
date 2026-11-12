@@ -4,6 +4,8 @@ import os
 import sys
 import time
 import uuid
+import shutil
+import subprocess
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
 import httpx
@@ -26,8 +28,10 @@ class MCPClient:
         env_vars: Optional[Dict[str, str]] = None,
         endpoint: Optional[str] = None,
         auth_token: Optional[str] = None,
-        timeout: int = 15
+        timeout: int = 15,
+        server_id: Optional[str] = None
     ):
+        self.server_id = server_id
         self.transport_type = transport_type.upper()
         self.command = command or sys.executable
         self.args = args or []
@@ -41,27 +45,164 @@ class MCPClient:
         self._req_id += 1
         return self._req_id
 
+    def _resolve_command_and_args(self) -> Tuple[str, List[str], Optional[str]]:
+        """
+        Resolves command binary and script paths against current execution environment.
+        Handles relative paths, missing interpreter paths, and sets appropriate working directory.
+        """
+        cmd = self.command
+        # If cmd is generic python or nonexistent absolute path, resolve to current running sys.executable
+        if not cmd or cmd.lower() in ("python", "python.exe", "python3", "python3.exe") or not os.path.exists(cmd):
+            resolved = shutil.which(cmd) if cmd else None
+            if resolved and os.path.exists(resolved):
+                cmd = resolved
+            else:
+                cmd = sys.executable
+
+        resolved_args = []
+        cwd = None
+        for a in self.args:
+            # Check if argument is a python script
+            if isinstance(a, str) and a.endswith(".py"):
+                if os.path.exists(a):
+                    resolved_args.append(os.path.abspath(a))
+                    cwd = os.path.dirname(os.path.abspath(a))
+                else:
+                    # Attempt resolving against demo_servers folder
+                    script_name = os.path.basename(a)
+                    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+                    candidates = [
+                        os.path.abspath(os.path.join(base_dir, "app", "mcp", "demo_servers", script_name)),
+                        os.path.abspath(os.path.join(base_dir, "backend", "app", "mcp", "demo_servers", script_name)),
+                        os.path.abspath(os.path.join(os.getcwd(), "backend", "app", "mcp", "demo_servers", script_name)),
+                        os.path.abspath(os.path.join(os.getcwd(), "app", "mcp", "demo_servers", script_name)),
+                        os.path.abspath(os.path.join(os.getcwd(), a)),
+                    ]
+                    found = next((c for c in candidates if os.path.exists(c)), None)
+                    if found:
+                        resolved_args.append(found)
+                        cwd = os.path.dirname(found)
+                    else:
+                        resolved_args.append(a)
+            else:
+                resolved_args.append(a)
+
+        if not cwd:
+            cwd = os.getcwd()
+
+        return cmd, resolved_args, cwd
+
+    @staticmethod
+    def _sync_stdio_exchange(cmd_list: List[str], requests: List[Dict[str, Any]], env: Dict[str, str], cwd: Optional[str]) -> List[Dict[str, Any]]:
+        """
+        Synchronous STDIO exchange executed in a background worker thread.
+        Universally compatible across all OS environments and event loops (Selector and Proactor).
+        """
+        try:
+            proc = subprocess.Popen(
+                cmd_list,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,
+                env=env,
+                cwd=cwd
+            )
+        except FileNotFoundError:
+            raise MCPClientError(f"Command not found or executable unavailable: '{cmd_list[0]}'")
+        except Exception as e:
+            raise MCPClientError(f"Failed to start MCP server subprocess ({cmd_list}): {str(e)}")
+
+        responses = []
+        try:
+            for req in requests:
+                req_line = json.dumps(req) + "\n"
+                proc.stdin.write(req_line)
+                proc.stdin.flush()
+
+                if "id" not in req:
+                    continue
+
+                line = proc.stdout.readline()
+                if not line:
+                    err = proc.stderr.read().strip() if proc.stderr else "Process terminated without error output."
+                    raise MCPClientError(f"Server closed stream prematurely. Stderr: {err}")
+
+                resp_text = line.strip()
+                if not resp_text:
+                    continue
+                try:
+                    resp_data = json.loads(resp_text)
+                    responses.append(resp_data)
+                except json.JSONDecodeError:
+                    raise MCPClientError(f"Server returned non-JSON response: '{resp_text[:120]}'")
+
+        finally:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+        return responses
+
     async def _execute_stdio_exchange(self, requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Executes a sequence of JSON-RPC requests against a STDIO MCP server process.
         Safely captures stdout and stderr with timeout guards.
+        Transparently handles Windows SelectorEventLoop via worker thread.
         """
         env = os.environ.copy()
         env.update(self.env_vars)
         env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
 
-        cmd_list = [self.command] + self.args
-        
+        cmd, resolved_args, cwd = self._resolve_command_and_args()
+        cmd_list = [cmd] + resolved_args
+
+        # Detect whether current asyncio loop supports subprocesses
+        loop = asyncio.get_running_loop()
+        is_proactor = isinstance(loop, getattr(asyncio, "ProactorEventLoop", type(None)))
+
+        # On Windows when running under SelectorEventLoop (e.g. Uvicorn with reload),
+        # create_subprocess_exec raises NotImplementedError.
+        # Fall back to thread-safe execution via subprocess.Popen in asyncio.to_thread.
+        if sys.platform == "win32" and not is_proactor:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(self._sync_stdio_exchange, cmd_list, requests, env, cwd),
+                    timeout=float(self.timeout * max(1, len(requests)) + 2.0)
+                )
+            except asyncio.TimeoutError:
+                raise MCPClientError(f"MCP server timed out after {self.timeout}s.")
+            except Exception as e:
+                if isinstance(e, MCPClientError):
+                    raise e
+                raise MCPClientError(f"MCP execution error: {str(e)}")
+
+        # Otherwise, attempt native async subprocess
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd_list,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=env
+                env=env,
+                cwd=cwd
+            )
+        except NotImplementedError:
+            # Fallback to thread-safe execution if loop doesn't support subprocesses
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._sync_stdio_exchange, cmd_list, requests, env, cwd),
+                timeout=float(self.timeout * max(1, len(requests)) + 2.0)
             )
         except FileNotFoundError:
-            raise MCPClientError(f"Command not found or executable unavailable: '{self.command}'")
+            raise MCPClientError(f"Command not found or executable unavailable: '{cmd}'")
         except Exception as e:
             raise MCPClientError(f"Failed to start MCP server subprocess ({cmd_list}): {str(e)}")
 
@@ -92,7 +233,7 @@ class MCPClient:
                 try:
                     resp_data = json.loads(resp_text)
                     responses.append(resp_data)
-                except json.JSONDecodeError as jde:
+                except json.JSONDecodeError:
                     raise MCPClientError(f"Server returned non-JSON response: '{resp_text[:120]}'")
 
         finally:
@@ -454,6 +595,18 @@ class MCPConnectionManager:
                 inc["status"] = "RESOLVED"
                 inc["resolved_at"] = datetime.utcnow().isoformat()
                 inc["actions_taken"] += " Circuit manually reset and recalibrated by Administrator."
+
+    @classmethod
+    def reset_all_circuits(cls):
+        """Resets all circuit breakers and failure counts across all registered servers."""
+        cls._failure_counts.clear()
+        cls._circuit_open.clear()
+        cls._states.clear()
+        for inc in cls._incidents:
+            if inc.get("status") == "ACTIVE":
+                inc["status"] = "RESOLVED"
+                inc["resolved_at"] = datetime.utcnow().isoformat()
+                inc["actions_taken"] += " System-wide circuit reset applied."
 
     @classmethod
     def get_incidents(cls) -> List[Dict[str, Any]]:

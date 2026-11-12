@@ -393,36 +393,89 @@ async def execute_construction_risk_workflow(
     })
 
     # Generate synthesis narrative
+    num_planned = len(plan_steps)
+    num_succeeded = len(executed_results)
     critical_pids = risk_assessment["summary"]["critical_projects"]
-    synthesis_lines = [
-        "CONSTRUCTION PROJECT RISK INTELLIGENCE — EXECUTIVE ASSESSMENT",
-        "--------------------------------------------------------------------------------",
-        f"Assessed {risk_assessment['summary']['total_projects_assessed']} active capital infrastructure projects across ERP, Equipment, and Inventory domains.",
-        ""
-    ]
 
-    if critical_pids:
-        synthesis_lines.append(f"CRITICAL PROJECT AT RISK: {', '.join(critical_pids)}")
-        for p in risk_assessment["projects"]:
-            if p["overall_risk"] == "CRITICAL":
-                synthesis_lines.extend([
-                    f"  * Project: {p['project_name']} ({p['project_id']})",
-                    f"  * Site: {p['site']} | Division: {p['division']}",
-                    f"  * Root Causes: Compound operational failure across delayed milestone, machinery alarm, and inventory deficit.",
-                    f"  * Evidence:",
-                ] + [f"    - {e}" for e in p["evidence"]] + [
-                    f"  * Business Impact: {p['business_impact']}",
-                    f"  * Recommended Action: {p['recommended_action']}",
-                    ""
-                ])
+    if num_succeeded == 0:
+        overall_status = "FAILED"
+        synthesis_lines = [
+            "CONSTRUCTION PROJECT RISK INTELLIGENCE — EXECUTION FAILURE",
+            "--------------------------------------------------------------------------------",
+            "CRITICAL: Unable to assess construction project risks due to MCP server subprocess execution failure.",
+            "All targeted MCP servers (ERP, Equipment, Inventory) failed to respond or return telemetry.",
+            "",
+            "DIAGNOSTIC DETAILS:"
+        ]
+        for key, info in server_progress.items():
+            if key not in ("agent_planning", "policy_evaluation", "completion_status") and info.get("status") == "FAILED":
+                synthesis_lines.append(f"  * {info.get('server')}: {info.get('error')}")
+        synthesis_lines.extend([
+            "",
+            "RECOMMENDATION: Verify MCP server subprocess configuration, transport health, and restart failed servers before retrying risk synthesis."
+        ])
+    elif num_succeeded < num_planned:
+        overall_status = "PARTIAL_SUCCESS"
+        synthesis_lines = [
+            "CONSTRUCTION PROJECT RISK INTELLIGENCE — PARTIAL TELEMETRY ASSESSMENT",
+            "--------------------------------------------------------------------------------",
+            f"PARTIAL DATA: Risk synthesis generated from {num_succeeded}/{num_planned} responding MCP servers.",
+            f"Assessed {risk_assessment['summary']['total_projects_assessed']} projects with incomplete telemetry coverage.",
+            ""
+        ]
+        if critical_pids:
+            synthesis_lines.append(f"CRITICAL PROJECT AT RISK: {', '.join(critical_pids)}")
+            for p in risk_assessment["projects"]:
+                if p["overall_risk"] == "CRITICAL":
+                    synthesis_lines.extend([
+                        f"  * Project: {p['project_name']} ({p['project_id']})",
+                        f"  * Site: {p['site']} | Division: {p['division']}",
+                        f"  * Root Causes: Compound operational failure across delayed milestone, machinery alarm, and inventory deficit.",
+                        f"  * Evidence:",
+                    ] + [f"    - {e}" for e in p["evidence"]] + [
+                        f"  * Business Impact: {p['business_impact']}",
+                        f"  * Recommended Action: {p['recommended_action']}",
+                        ""
+                    ])
+        else:
+            synthesis_lines.append("No critical risks identified in available domain feeds. CAUTION: Missing telemetry from failed servers may conceal active risks.")
     else:
-        synthesis_lines.append("All projects assessed are operating within safe engineering margins.")
+        overall_status = "SUCCESS"
+        synthesis_lines = [
+            "CONSTRUCTION PROJECT RISK INTELLIGENCE — EXECUTIVE ASSESSMENT",
+            "--------------------------------------------------------------------------------",
+            f"Assessed {risk_assessment['summary']['total_projects_assessed']} active capital infrastructure projects across ERP, Equipment, and Inventory domains.",
+            ""
+        ]
+        if critical_pids:
+            synthesis_lines.append(f"CRITICAL PROJECT AT RISK: {', '.join(critical_pids)}")
+            for p in risk_assessment["projects"]:
+                if p["overall_risk"] == "CRITICAL":
+                    synthesis_lines.extend([
+                        f"  * Project: {p['project_name']} ({p['project_id']})",
+                        f"  * Site: {p['site']} | Division: {p['division']}",
+                        f"  * Root Causes: Compound operational failure across delayed milestone, machinery alarm, and inventory deficit.",
+                        f"  * Evidence:",
+                    ] + [f"    - {e}" for e in p["evidence"]] + [
+                        f"  * Business Impact: {p['business_impact']}",
+                        f"  * Recommended Action: {p['recommended_action']}",
+                        ""
+                    ])
+        else:
+            synthesis_lines.append("All projects assessed are operating within safe engineering margins.")
 
     synthesis_text = "\n".join(synthesis_lines)
     total_duration = round((time.perf_counter() - start_time) * 1000.0, 2)
 
-    server_progress["completion_status"]["status"] = "COMPLETED"
-    server_progress["completion_status"]["percentage"] = 100
+    if overall_status == "SUCCESS":
+        server_progress["completion_status"]["status"] = "COMPLETED"
+        server_progress["completion_status"]["percentage"] = 100
+    elif overall_status == "PARTIAL_SUCCESS":
+        server_progress["completion_status"]["status"] = "PARTIAL_SUCCESS"
+        server_progress["completion_status"]["percentage"] = int((num_succeeded / num_planned) * 100)
+    else:
+        server_progress["completion_status"]["status"] = "FAILED"
+        server_progress["completion_status"]["percentage"] = 0
     server_progress["completion_status"]["duration_ms"] = total_duration
 
     # STEP 10: Store the execution trace and final result

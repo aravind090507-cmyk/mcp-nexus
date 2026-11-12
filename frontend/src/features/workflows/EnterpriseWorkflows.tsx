@@ -146,7 +146,9 @@ export const EnterpriseWorkflows: React.FC = () => {
                   ? 'bg-[#F0A43A]/20 text-[#F0A43A] border-[#F0A43A]/40 animate-pulse'
                   : executionResult?.execution_status === 'SUCCESS'
                   ? 'bg-[#43B581]/20 text-[#43B581] border-[#43B581]/40'
-                  : executionResult?.execution_status === 'BLOCKED'
+                  : executionResult?.execution_status === 'PARTIAL_SUCCESS' || executionResult?.execution_status === 'PARTIAL_FAILURE'
+                  ? 'bg-[#F0A43A]/20 text-[#F0A43A] border-[#F0A43A]/40'
+                  : executionResult?.execution_status === 'FAILED' || executionResult?.execution_status === 'BLOCKED'
                   ? 'bg-[#E05252]/20 text-[#E05252] border-[#E05252]/40'
                   : 'bg-[#181C23] text-[#9DA7B5] border-[#303640]'
               }`}
@@ -212,6 +214,8 @@ export const EnterpriseWorkflows: React.FC = () => {
                 <span className="text-[#F0A43A] animate-pulse">PROBING...</span>
               ) : serverProgress.erp_server?.status === 'COMPLETED' ? (
                 <span className="text-[#43B581]">COMPLETED ({serverProgress.erp_server?.duration_ms || 4}ms)</span>
+              ) : serverProgress.erp_server?.status === 'FAILED' ? (
+                <span className="text-[#E05252]" title={serverProgress.erp_server?.error}>FAILED</span>
               ) : (
                 <span className="text-[#9DA7B5]">READY</span>
               )}
@@ -232,6 +236,8 @@ export const EnterpriseWorkflows: React.FC = () => {
                 <span className="text-[#F0A43A] animate-pulse">PROBING...</span>
               ) : serverProgress.equipment_server?.status === 'COMPLETED' ? (
                 <span className="text-[#43B581]">COMPLETED ({serverProgress.equipment_server?.duration_ms || 6}ms)</span>
+              ) : serverProgress.equipment_server?.status === 'FAILED' ? (
+                <span className="text-[#E05252]" title={serverProgress.equipment_server?.error}>FAILED</span>
               ) : (
                 <span className="text-[#9DA7B5]">READY</span>
               )}
@@ -252,6 +258,8 @@ export const EnterpriseWorkflows: React.FC = () => {
                 <span className="text-[#F0A43A] animate-pulse">PROBING...</span>
               ) : serverProgress.inventory_server?.status === 'COMPLETED' ? (
                 <span className="text-[#43B581]">COMPLETED ({serverProgress.inventory_server?.duration_ms || 5}ms)</span>
+              ) : serverProgress.inventory_server?.status === 'FAILED' ? (
+                <span className="text-[#E05252]" title={serverProgress.inventory_server?.error}>FAILED</span>
               ) : (
                 <span className="text-[#9DA7B5]">READY</span>
               )}
@@ -310,6 +318,10 @@ export const EnterpriseWorkflows: React.FC = () => {
             <div className="text-[9px] font-bold">
               {isExecuting ? (
                 <span className="text-[#F0A43A] animate-pulse">RUNNING...</span>
+              ) : executionResult?.execution_status === 'FAILED' ? (
+                <span className="text-[#E05252]">FAILED ({executionResult.duration_ms} ms)</span>
+              ) : executionResult?.execution_status === 'PARTIAL_SUCCESS' || executionResult?.execution_status === 'PARTIAL_FAILURE' ? (
+                <span className="text-[#F0A43A]">PARTIAL ({executionResult.duration_ms} ms)</span>
               ) : executionResult ? (
                 <span className="text-[#43B581]">{executionResult.duration_ms} ms</span>
               ) : (
@@ -479,51 +491,57 @@ export const EnterpriseWorkflows: React.FC = () => {
               </span>
             </div>
 
-            <div className="space-y-2">
-              {executionResult.tool_executions?.map((t: any, idx: number) => {
-                const isExpanded = expandedEvidence === `tool-${idx}`;
-                return (
-                  <div key={idx} className="bg-[#101216] border border-[#303640] rounded overflow-hidden">
-                    <button
-                      onClick={() => setExpandedEvidence(isExpanded ? null : `tool-${idx}`)}
-                      className="w-full flex items-center justify-between p-3 text-left hover:bg-[#181C23] transition-colors"
-                    >
-                      <div className="flex items-center gap-3">
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#303640] text-[#ECEFF4] font-bold">
-                          #{t.step || idx + 1}
-                        </span>
-                        <div>
-                          <span className="text-xs font-bold text-[#48B9D0]">{t.server}</span>
-                          <span className="text-xs text-[#9DA7B5] mx-1.5">&rarr;</span>
-                          <span className="text-xs font-bold text-[#F0A43A]">{t.tool}</span>
+            {(!executionResult.tool_executions || executionResult.tool_executions.length === 0) ? (
+              <div className="p-3 bg-[#101216] border border-[#E05252]/40 rounded text-xs text-[#E05252]">
+                No tool responses recorded. One or more MCP server subprocesses encountered errors or were unavailable. Check the Diagnostic Details in the Executive Summary above.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {executionResult.tool_executions.map((t: any, idx: number) => {
+                  const isExpanded = expandedEvidence === `tool-${idx}`;
+                  return (
+                    <div key={idx} className="bg-[#101216] border border-[#303640] rounded overflow-hidden">
+                      <button
+                        onClick={() => setExpandedEvidence(isExpanded ? null : `tool-${idx}`)}
+                        className="w-full flex items-center justify-between p-3 text-left hover:bg-[#181C23] transition-colors"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#303640] text-[#ECEFF4] font-bold">
+                            #{t.step || idx + 1}
+                          </span>
+                          <div>
+                            <span className="text-xs font-bold text-[#48B9D0]">{t.server}</span>
+                            <span className="text-xs text-[#9DA7B5] mx-1.5">&rarr;</span>
+                            <span className="text-xs font-bold text-[#F0A43A]">{t.tool}</span>
+                          </div>
                         </div>
-                      </div>
 
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] px-2 py-0.5 rounded bg-[#43B581]/15 text-[#43B581] border border-[#43B581]/30">
-                          PROVABLE EVIDENCE
-                        </span>
-                        {isExpanded ? <ChevronUp className="w-4 h-4 text-[#9DA7B5]" /> : <ChevronDown className="w-4 h-4 text-[#9DA7B5]" />}
-                      </div>
-                    </button>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-[#43B581]/15 text-[#43B581] border border-[#43B581]/30">
+                            PROVABLE EVIDENCE
+                          </span>
+                          {isExpanded ? <ChevronUp className="w-4 h-4 text-[#9DA7B5]" /> : <ChevronDown className="w-4 h-4 text-[#9DA7B5]" />}
+                        </div>
+                      </button>
 
-                    {isExpanded && (
-                      <div className="p-3 border-t border-[#303640] bg-[#0D0F12] text-[11px]">
-                        <div className="text-[10px] text-[#9DA7B5] mb-1">Tool Input Arguments:</div>
-                        <pre className="p-2 bg-[#14171D] rounded text-[#ECEFF4] overflow-x-auto mb-3">
-                          {JSON.stringify(t.arguments || {}, null, 2)}
-                        </pre>
+                      {isExpanded && (
+                        <div className="p-3 border-t border-[#303640] bg-[#0D0F12] text-[11px]">
+                          <div className="text-[10px] text-[#9DA7B5] mb-1">Tool Input Arguments:</div>
+                          <pre className="p-2 bg-[#14171D] rounded text-[#ECEFF4] overflow-x-auto mb-3">
+                            {JSON.stringify(t.arguments || {}, null, 2)}
+                          </pre>
 
-                        <div className="text-[10px] text-[#9DA7B5] mb-1">Factual Tool Output:</div>
-                        <pre className="p-2 bg-[#14171D] rounded text-[#43B581] overflow-x-auto">
-                          {JSON.stringify(t.output || {}, null, 2)}
-                        </pre>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+                          <div className="text-[10px] text-[#9DA7B5] mb-1">Factual Tool Output:</div>
+                          <pre className="p-2 bg-[#14171D] rounded text-[#43B581] overflow-x-auto">
+                            {JSON.stringify(t.output || {}, null, 2)}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* SECTION E: Execution Trace Linkage */}
