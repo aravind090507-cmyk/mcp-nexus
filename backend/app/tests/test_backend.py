@@ -540,5 +540,27 @@ def test_policy_engine_dynamic_evaluation_rule(client, admin_headers):
     assert e2_res.status_code == 200
     assert e2_res.json()["is_success"] is True
 
+def test_mcp_auto_discovery_endpoint(client, admin_headers):
+    """Verify probing and capability discovery on an MCP server endpoint before registration."""
+    payload = {
+        "transport_type": "STDIO",
+        "command": "python",
+        "args": ["demo_servers/equipment_server.py"]
+    }
+    res = client.post("/api/v1/servers/discover", json=payload, headers=admin_headers)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["success"] is True
+    assert data["protocol_version"] == "2024-11-05"
+    assert "tools" in data["capabilities"]
+    assert len(data["discovered_tools"]) >= 3
+    tool_names = [t["name"] for t in data["discovered_tools"]]
+    assert "get_equipment_status" in tool_names
+    assert "report_equipment_issue" in tool_names
+    assert len(data["discovered_resources"]) >= 1
+    assert len(data["discovered_prompts"]) >= 1
+    assert data["latency_ms"] >= 0.0
+
+
 
 

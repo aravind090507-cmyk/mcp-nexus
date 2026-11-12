@@ -56,6 +56,25 @@ class MCPServerUpdate(BaseModel):
     is_enabled: Optional[bool] = None
     connection_timeout: Optional[int] = None
 
+class ServerDiscoverRequest(BaseModel):
+    transport_type: str = "STDIO" # STDIO, HTTP_SSE, HTTP
+    command: Optional[str] = None
+    args: List[str] = []
+    endpoint: Optional[str] = None
+    env_vars: Dict[str, str] = {}
+    auth_token: Optional[str] = None
+
+class ServerDiscoverResponse(BaseModel):
+    success: bool
+    protocol_version: str = "2024-11-05"
+    server_info: Dict[str, Any] = {}
+    capabilities: Dict[str, Any] = {}
+    discovered_tools: List[Dict[str, Any]] = []
+    discovered_resources: List[Dict[str, Any]] = []
+    discovered_prompts: List[Dict[str, Any]] = []
+    latency_ms: float = 0.0
+    error: Optional[str] = None
+
 class MCPToolOut(BaseModel):
     id: str
     server_id: str

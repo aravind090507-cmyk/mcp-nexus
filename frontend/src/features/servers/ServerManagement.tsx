@@ -27,9 +27,22 @@ export const ServerManagement: React.FC = () => {
   const [showRegisterModal, setShowRegisterModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showLogsModal, setShowLogsModal] = useState(false);
+  const [showDiscoverModal, setShowDiscoverModal] = useState(false);
   const [serverLogs, setServerLogs] = useState<string[]>([]);
   const [searchFilter, setSearchFilter] = useState('');
   const [envFilter, setEnvFilter] = useState<string>('ALL');
+
+  // Discovery form state
+  const [discoverForm, setDiscoverForm] = useState({
+    transport_type: 'STDIO',
+    command: 'python',
+    args: 'demo_servers/equipment_server.py',
+    endpoint: '',
+    auth_token: '',
+  });
+  const [discoverResult, setDiscoverResult] = useState<any>(null);
+  const [isProbing, setIsProbing] = useState(false);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
 
   // Form state
   const [formData, setFormData] = useState({
@@ -146,6 +159,51 @@ export const ServerManagement: React.FC = () => {
     });
   };
 
+  const handleProbeEndpoint = async () => {
+    setIsProbing(true);
+    setDiscoverError(null);
+    setDiscoverResult(null);
+    try {
+      const argsArray = discoverForm.args.trim() ? discoverForm.args.split(' ').map((s) => s.trim()) : [];
+      const res = await api.discoverEndpoint({
+        transport_type: discoverForm.transport_type,
+        command: discoverForm.command,
+        args: argsArray,
+        endpoint: discoverForm.endpoint,
+        auth_token: discoverForm.auth_token || undefined,
+      });
+      if (res.success) {
+        setDiscoverResult(res);
+      } else {
+        setDiscoverError(res.error || 'Failed to handshake with MCP endpoint.');
+      }
+    } catch (err: any) {
+      setDiscoverError(err.message || 'Auto-discovery probe failed.');
+    } finally {
+      setIsProbing(false);
+    }
+  };
+
+  const handleApproveDiscoveredServer = async () => {
+    if (!discoverResult) return;
+    const serverName = discoverResult.server_info?.name || 'Discovered MCP Server';
+    const serverId = serverName.toLowerCase().replace(/[^a-z0-9]/g, '-') + '-' + Math.floor(Math.random() * 1000);
+    const argsArray = discoverForm.args.trim() ? discoverForm.args.split(' ').map((s) => s.trim()) : [];
+
+    registerMutation.mutate({
+      name: serverName,
+      identifier: serverId,
+      description: `Auto-discovered MCP server (Protocol ${discoverResult.protocol_version}). Discovered ${discoverResult.discovered_tools?.length || 0} tools.`,
+      transport_type: discoverForm.transport_type,
+      command: discoverForm.command,
+      args: argsArray,
+      endpoint: discoverForm.endpoint || undefined,
+      environment: 'Production',
+      connection_timeout: 15,
+    });
+    setShowDiscoverModal(false);
+  };
+
   // Register mutation
   const registerMutation = useMutation({
     mutationFn: (payload: any) => api.registerServer(payload),
@@ -212,13 +270,26 @@ export const ServerManagement: React.FC = () => {
             Register and manage Model Context Protocol servers supporting STDIO subprocesses and Streamable HTTP.
           </p>
         </div>
-        <button
-          onClick={() => setShowRegisterModal(true)}
-          className="flex items-center gap-2 px-3.5 py-1.5 bg-[#F0A43A] hover:bg-[#F0A43A]/90 text-[#101216] font-semibold rounded text-xs transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          Register MCP Server
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              setDiscoverResult(null);
+              setDiscoverError(null);
+              setShowDiscoverModal(true);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-[#181C23] hover:bg-[#303640] border border-[#48B9D0]/40 text-[#48B9D0] font-semibold rounded text-xs transition-colors"
+          >
+            <Activity className="w-3.5 h-3.5" />
+            Auto-Discover Endpoint
+          </button>
+          <button
+            onClick={() => setShowRegisterModal(true)}
+            className="flex items-center gap-2 px-3.5 py-1.5 bg-[#F0A43A] hover:bg-[#F0A43A]/90 text-[#101216] font-semibold rounded text-xs transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            Register MCP Server
+          </button>
+        </div>
       </div>
 
       {/* Filter and Search Bar */}
@@ -722,6 +793,212 @@ export const ServerManagement: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* AUTO-DISCOVER & CAPABILITY HANDSHAKE MODAL */}
+      {showDiscoverModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#14171D] border border-[#303640] rounded-lg max-w-3xl w-full p-6 space-y-4 font-mono shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-[#303640] pb-3 text-xs">
+              <span className="font-bold text-[#ECEFF4] flex items-center gap-2">
+                <Activity className="w-4 h-4 text-[#48B9D0]" />
+                MCP Auto-Discovery & Capability Negotiation
+              </span>
+              <button
+                onClick={() => {
+                  setShowDiscoverModal(false);
+                  setDiscoverResult(null);
+                  setDiscoverError(null);
+                }}
+              >
+                <X className="w-4 h-4 text-[#626D7C] hover:text-[#ECEFF4]" />
+              </button>
+            </div>
+
+            <p className="text-xs text-[#9DA7B5] font-sans">
+              Probe an external or local MCP endpoint, perform a protocol handshake (JSON-RPC 2.0 initialize), and inspect discovered capabilities, tools, resources, and prompts before administrative activation.
+            </p>
+
+            {/* Probe Inputs */}
+            <div className="space-y-3 bg-[#101216] p-4 rounded border border-[#303640] text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[#9DA7B5] mb-1 font-semibold">Transport Type</label>
+                  <select
+                    value={discoverForm.transport_type}
+                    onChange={(e) => setDiscoverForm({ ...discoverForm, transport_type: e.target.value })}
+                    className="w-full bg-[#181C23] border border-[#303640] rounded px-3 py-1.5 text-[#ECEFF4] focus:outline-none focus:border-[#48B9D0]"
+                  >
+                    <option value="STDIO">STDIO Subprocess</option>
+                    <option value="HTTP_SSE">Streamable HTTP (SSE)</option>
+                    <option value="HTTP">Standard HTTP POST</option>
+                  </select>
+                </div>
+
+                {discoverForm.transport_type === 'STDIO' ? (
+                  <div>
+                    <label className="block text-[#9DA7B5] mb-1 font-semibold">Executable Command</label>
+                    <input
+                      type="text"
+                      value={discoverForm.command}
+                      onChange={(e) => setDiscoverForm({ ...discoverForm, command: e.target.value })}
+                      placeholder="e.g. python, uv, node, docker"
+                      className="w-full bg-[#181C23] border border-[#303640] rounded px-3 py-1.5 text-[#ECEFF4] focus:outline-none focus:border-[#48B9D0]"
+                    />
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-[#9DA7B5] mb-1 font-semibold">HTTP Endpoint URL</label>
+                    <input
+                      type="text"
+                      value={discoverForm.endpoint}
+                      onChange={(e) => setDiscoverForm({ ...discoverForm, endpoint: e.target.value })}
+                      placeholder="e.g. http://127.0.0.1:8001/mcp"
+                      className="w-full bg-[#181C23] border border-[#303640] rounded px-3 py-1.5 text-[#ECEFF4] focus:outline-none focus:border-[#48B9D0]"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {discoverForm.transport_type === 'STDIO' && (
+                <div>
+                  <label className="block text-[#9DA7B5] mb-1 font-semibold">Subprocess Arguments</label>
+                  <input
+                    type="text"
+                    value={discoverForm.args}
+                    onChange={(e) => setDiscoverForm({ ...discoverForm, args: e.target.value })}
+                    placeholder="e.g. demo_servers/equipment_server.py"
+                    className="w-full bg-[#181C23] border border-[#303640] rounded px-3 py-1.5 text-[#ECEFF4] focus:outline-none focus:border-[#48B9D0]"
+                  />
+                </div>
+              )}
+
+              {discoverForm.transport_type !== 'STDIO' && (
+                <div>
+                  <label className="block text-[#9DA7B5] mb-1 font-semibold">Bearer Auth Token (Optional)</label>
+                  <input
+                    type="text"
+                    value={discoverForm.auth_token}
+                    onChange={(e) => setDiscoverForm({ ...discoverForm, auth_token: e.target.value })}
+                    placeholder="Optional Authorization token..."
+                    className="w-full bg-[#181C23] border border-[#303640] rounded px-3 py-1.5 text-[#ECEFF4] focus:outline-none focus:border-[#48B9D0]"
+                  />
+                </div>
+              )}
+
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={handleProbeEndpoint}
+                  disabled={isProbing}
+                  className="flex items-center gap-1.5 px-4 py-1.5 bg-[#48B9D0] hover:bg-[#3ca4ba] text-[#101216] font-bold rounded text-xs transition-colors"
+                >
+                  <Activity className={`w-3.5 h-3.5 ${isProbing ? 'animate-spin' : ''}`} />
+                  {isProbing ? 'Negotiating Protocol...' : 'Probe & Negotiate Capabilities'}
+                </button>
+              </div>
+            </div>
+
+            {/* Error Banner */}
+            {discoverError && (
+              <div className="p-3 bg-[#E05252]/10 border border-[#E05252]/30 rounded text-xs text-[#E05252] flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                <span>Probe Error: {discoverError}</span>
+              </div>
+            )}
+
+            {/* Discovery Results */}
+            {discoverResult && (
+              <div className="space-y-4 pt-2">
+                {/* Protocol Header */}
+                <div className="p-4 bg-[#181C23] border border-[#303640] rounded space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-[#ECEFF4] text-sm">
+                      {discoverResult.server_info?.name || 'MCP Endpoint Detected'}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded text-[10px] bg-[#43B581]/15 text-[#43B581] border border-[#43B581]/30 font-bold">
+                        VERSION: {discoverResult.protocol_version}
+                      </span>
+                      <span className="px-2 py-0.5 rounded text-[10px] bg-[#F0A43A]/15 text-[#F0A43A] border border-[#F0A43A]/30 font-bold">
+                        LATENCY: {discoverResult.latency_ms} ms
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-[10px] text-[#9DA7B5] pt-1 border-t border-[#303640]">
+                    <span>Negotiated Capabilities:</span>
+                    {Object.keys(discoverResult.capabilities || {}).map((c) => (
+                      <span key={c} className="px-2 py-0.5 rounded bg-[#101216] border border-[#303640] text-[#48B9D0]">
+                        {c}
+                      </span>
+                    ))}
+                    <span className="px-2 py-0.5 rounded bg-[#101216] border border-[#303640] text-[#ECEFF4]">
+                      {discoverResult.discovered_tools?.length || 0} Tools
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-[#101216] border border-[#303640] text-[#ECEFF4]">
+                      {discoverResult.discovered_resources?.length || 0} Resources
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-[#101216] border border-[#303640] text-[#ECEFF4]">
+                      {discoverResult.discovered_prompts?.length || 0} Prompts
+                    </span>
+                  </div>
+                </div>
+
+                {/* Discovered Tools List */}
+                <div>
+                  <div className="text-[11px] font-bold text-[#9DA7B5] uppercase mb-2">
+                    Discovered Tools ({discoverResult.discovered_tools?.length || 0})
+                  </div>
+                  <div className="border border-[#303640] rounded overflow-hidden max-h-48 overflow-y-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-[#181C23] text-[#9DA7B5] border-b border-[#303640]">
+                        <tr>
+                          <th className="py-2 px-3">Tool Name</th>
+                          <th className="py-2 px-3">Description</th>
+                          <th className="py-2 px-3">Parameters</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#303640] bg-[#101216]">
+                        {discoverResult.discovered_tools?.map((tool: any) => (
+                          <tr key={tool.name}>
+                            <td className="py-2 px-3 font-bold text-[#F0A43A]">{tool.name}</td>
+                            <td className="py-2 px-3 text-[#ECEFF4] font-sans text-[11px]">{tool.description}</td>
+                            <td className="py-2 px-3 text-[#9DA7B5] text-[10px]">
+                              {tool.inputSchema?.properties ? Object.keys(tool.inputSchema.properties).join(', ') : 'none'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="flex items-center justify-end gap-3 pt-3 border-t border-[#303640]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowDiscoverModal(false);
+                      setDiscoverResult(null);
+                    }}
+                    className="px-4 py-1.5 bg-[#181C23] hover:bg-[#1F242D] border border-[#303640] rounded text-xs text-[#ECEFF4]"
+                  >
+                    Discard
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleApproveDiscoveredServer}
+                    className="flex items-center gap-1.5 px-4 py-1.5 bg-[#43B581] hover:bg-[#3aa374] text-[#101216] font-bold rounded text-xs transition-colors"
+                  >
+                    <CheckCircle className="w-3.5 h-3.5" />
+                    Approve & Register Server
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

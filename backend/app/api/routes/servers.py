@@ -3,7 +3,10 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from app.database.session import get_db
 from app.models.all_models import MCPServer, MCPTool, User, Organization
-from app.schemas.all_schemas import MCPServerCreate, MCPServerUpdate, MCPServerOut, MCPToolOut
+from app.schemas.all_schemas import (
+    MCPServerCreate, MCPServerUpdate, MCPServerOut, MCPToolOut,
+    ServerDiscoverRequest, ServerDiscoverResponse
+)
 from app.services.mcp_manager import MCPManager
 from app.services.audit_service import AuditService
 from app.api.deps import get_current_user, require_permission
@@ -269,3 +272,80 @@ def get_server_logs(
         f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] DEBUG [telemetry] Error rate: {round(server.error_rate * 100, 2)}% | Total dispatches: {server.total_calls}"
     ]
     return {"server_id": server.id, "server_name": server.name, "logs": logs}
+
+@router.post("/discover", response_model=ServerDiscoverResponse)
+async def auto_discover_endpoint(
+    req: ServerDiscoverRequest,
+    current_user: User = Depends(require_permission(PermissionEnum.SERVERS_WRITE))
+):
+    """
+    Probes an external MCP endpoint (STDIO or HTTP_SSE), negotiates protocol capabilities,
+    and returns discovered tools, resources, and prompts for admin review before activation.
+    """
+    from app.mcp.client import MCPClient
+    import time
+    import os
+    
+    start_time = time.perf_counter()
+    try:
+        cmd = req.command
+        args = list(req.args or [])
+        if cmd in ("python", "python3") and getattr(sys, "executable", None):
+            cmd = sys.executable
+
+        # Resolve demo server script paths if needed
+        resolved_args = []
+        for a in args:
+            if a.endswith(".py") and not os.path.isabs(a):
+                candidates = [
+                    os.path.abspath(a),
+                    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "mcp", a)),
+                    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "mcp", "demo_servers", os.path.basename(a))),
+                    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "mcp", os.path.basename(a))),
+                ]
+                found = False
+                for c in candidates:
+                    if os.path.isfile(c):
+                        resolved_args.append(c)
+                        found = True
+                        break
+                if not found:
+                    resolved_args.append(a)
+            else:
+                resolved_args.append(a)
+        args = resolved_args
+
+        client = MCPClient(
+            transport_type=req.transport_type,
+            command=cmd,
+            args=args,
+            endpoint=req.endpoint,
+            env_vars=req.env_vars,
+            auth_token=req.auth_token,
+            timeout=10.0
+        )
+
+        init_res, handshake_ms = await client.initialize()
+        tools = await client.list_tools()
+        resources = await client.list_resources()
+        prompts = await client.list_prompts()
+        
+        total_latency = round((time.perf_counter() - start_time) * 1000.0, 2)
+        
+        return ServerDiscoverResponse(
+            success=True,
+            protocol_version=init_res.get("protocolVersion", "2024-11-05"),
+            server_info=init_res.get("serverInfo", {}),
+            capabilities=init_res.get("capabilities", {}),
+            discovered_tools=tools,
+            discovered_resources=resources,
+            discovered_prompts=prompts,
+            latency_ms=total_latency
+        )
+    except Exception as e:
+        total_latency = round((time.perf_counter() - start_time) * 1000.0, 2)
+        return ServerDiscoverResponse(
+            success=False,
+            latency_ms=total_latency,
+            error=str(e)
+        )

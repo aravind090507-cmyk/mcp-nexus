@@ -107,6 +107,25 @@ export const api = {
     fetchJSON<any>(`/servers/${id}/discover-tools`, { method: 'POST' }),
   getServerLogs: (id: string) =>
     fetchJSON<{ server_id: string; server_name: string; logs: string[] }>(`/servers/${id}/logs`),
+  discoverEndpoint: (data: {
+    transport_type: string;
+    command?: string;
+    args?: string[];
+    endpoint?: string;
+    env_vars?: Record<string, string>;
+    auth_token?: string;
+  }) =>
+    fetchJSON<{
+      success: boolean;
+      protocol_version: string;
+      server_info: Record<string, any>;
+      capabilities: Record<string, any>;
+      discovered_tools: any[];
+      discovered_resources: any[];
+      discovered_prompts: any[];
+      latency_ms: number;
+      error?: string;
+    }>('/servers/discover', { method: 'POST', body: JSON.stringify(data) }),
 
   // Tools & Playground
   getTools: (server_id?: string, risk_level?: string) => {
