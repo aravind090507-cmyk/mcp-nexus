@@ -127,6 +127,8 @@ async def execute_playground_tool(
             parameters=req.arguments,
             risk_level=risk_level,
             status="PENDING",
+            requires_dual_approval=(risk_level == "CRITICAL"),
+            expires_at=datetime.datetime.utcnow() + datetime.timedelta(hours=24),
             reason="Playground execution flagged for administrative sign-off"
         )
         db.add(app_req)

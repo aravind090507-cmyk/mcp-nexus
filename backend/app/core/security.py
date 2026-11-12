@@ -1,10 +1,13 @@
 import hashlib
 import os
 import hmac
-from datetime import datetime, timedelta
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
-from jose import jwt
+from jose import jwt, JWTError
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # Enterprise-grade PBKDF2-HMAC-SHA256 password hashing for guaranteed zero-dependency cross-platform stability
 def get_password_hash(password: str) -> str:
@@ -30,17 +33,34 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return hmac.compare_digest(key, new_key)
 
 def create_access_token(subject: Any, expires_delta: Optional[timedelta] = None) -> str:
+    now = datetime.now(timezone.utc)
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = now + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode = {"exp": expire, "sub": str(subject)}
+        expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode = {
+        "exp": expire,
+        "iat": now,
+        "iss": "mcp-nexus-auth",
+        "aud": "mcp-nexus-api",
+        "sub": str(subject)
+    }
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
 def decode_access_token(token: str) -> Optional[dict]:
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+            issuer="mcp-nexus-auth",
+            audience="mcp-nexus-api"
+        )
         return payload
-    except Exception:
+    except JWTError as e:
+        logger.warning(f"JWT verification failure: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected token decoding error: {e}")
         return None

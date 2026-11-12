@@ -59,7 +59,7 @@ ROLE_PERMISSIONS: Dict[RoleEnum, Set[PermissionEnum]] = {
     },
     RoleEnum.DEVELOPER: {
         PermissionEnum.SERVERS_READ, PermissionEnum.SERVERS_WRITE, PermissionEnum.SERVERS_CONNECT,
-        PermissionEnum.TOOLS_READ, PermissionEnum.TOOLS_TEST, PermissionEnum.TOOLS_CONFIG,
+        PermissionEnum.TOOLS_READ, PermissionEnum.TOOLS_TEST, PermissionEnum.TOOLS_EXECUTE, PermissionEnum.TOOLS_CONFIG,
         PermissionEnum.AGENTS_READ, PermissionEnum.AGENTS_WRITE,
         PermissionEnum.TRACES_READ, PermissionEnum.METRICS_READ,
         PermissionEnum.SETTINGS_READ

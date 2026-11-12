@@ -67,7 +67,7 @@ export const ApprovalQueue: React.FC = () => {
 
         {/* Filter Pills */}
         <div className="flex items-center space-x-1 bg-[#14171D] p-1 border border-[#303640] rounded text-xs">
-          {(['PENDING', 'APPROVED', 'REJECTED', 'EXECUTED', 'ALL'] as const).map((st) => (
+          {(['PENDING', 'PARTIALLY_APPROVED', 'APPROVED', 'REJECTED', 'EXECUTED', 'ALL'] as const).map((st) => (
             <button
               key={st}
               onClick={() => setStatusFilter(st)}
@@ -77,7 +77,7 @@ export const ApprovalQueue: React.FC = () => {
                   : 'text-[#9DA7B5] hover:text-[#ECEFF4]'
               }`}
             >
-              {st}
+              {st === 'PARTIALLY_APPROVED' ? 'DUAL-PENDING' : st}
             </button>
           ))}
         </div>
@@ -107,9 +107,17 @@ export const ApprovalQueue: React.FC = () => {
                     <span className="text-[10px] px-1.5 py-0.2 rounded font-bold bg-[#E05252]/15 text-[#E05252] border border-[#E05252]/30">
                       {req.risk_level} RISK
                     </span>
+                    {req.requires_dual_approval && (
+                      <span className="text-[10px] px-1.5 py-0.2 rounded font-bold bg-[#F0A43A]/15 text-[#F0A43A] border border-[#F0A43A]/30 flex items-center gap-1">
+                        <ShieldAlert className="w-3 h-3" />
+                        DUAL-CONTROL REQUIRED
+                      </span>
+                    )}
                     <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
                       req.status === 'PENDING'
                         ? 'bg-[#EBB346]/15 text-[#EBB346]'
+                        : req.status === 'PARTIALLY_APPROVED'
+                        ? 'bg-[#48B9D0]/15 text-[#48B9D0] border border-[#48B9D0]/30'
                         : req.status === 'APPROVED' || req.status === 'EXECUTED'
                         ? 'bg-[#43B581]/15 text-[#43B581]'
                         : 'bg-[#E05252]/15 text-[#E05252]'
@@ -121,6 +129,17 @@ export const ApprovalQueue: React.FC = () => {
                   <p className="text-xs text-[#9DA7B5] font-sans">
                     {req.operation_description}
                   </p>
+
+                  {/* Dual approval review details */}
+                  {req.first_approver_name && (
+                    <div className="text-[11px] text-[#48B9D0] bg-[#101216] p-2 border border-[#303640] rounded flex items-center gap-2">
+                      <CheckCircle className="w-3.5 h-3.5 text-[#43B581]" />
+                      <span>Stage 1 Sign-off: <strong>{req.first_approver_name}</strong> {req.first_approved_at && `(${new Date(req.first_approved_at).toLocaleTimeString()})`}</span>
+                      {req.status === 'PARTIALLY_APPROVED' && (
+                        <span className="text-[#F0A43A] ml-2">-- Awaiting second distinct administrator sign-off</span>
+                      )}
+                    </div>
+                  )}
 
                   <div className="flex flex-wrap items-center gap-4 text-[11px] text-[#626D7C] pt-1">
                     <span className="flex items-center gap-1">
@@ -137,6 +156,11 @@ export const ApprovalQueue: React.FC = () => {
                     <span className="text-[#626D7C]">
                       Created: {new Date(req.created_at).toLocaleString()}
                     </span>
+                    {req.expires_at && (
+                      <span className="text-[#EBB346]">
+                        Expires: {new Date(req.expires_at).toLocaleTimeString()}
+                      </span>
+                    )}
                   </div>
 
                   {req.parameters && Object.keys(req.parameters).length > 0 && (
@@ -148,7 +172,7 @@ export const ApprovalQueue: React.FC = () => {
                 </div>
 
                 {/* Actions */}
-                {req.status === 'PENDING' && (
+                {(req.status === 'PENDING' || req.status === 'PARTIALLY_APPROVED') && (
                   <div className="flex items-center gap-2 self-start md:self-center">
                     <button
                       onClick={() => handleAction(req.id, 'APPROVE')}
@@ -156,7 +180,7 @@ export const ApprovalQueue: React.FC = () => {
                       className="flex items-center gap-1.5 px-3 py-1.5 bg-[#43B581] hover:bg-[#43B581]/90 text-[#101216] font-bold rounded text-xs transition-colors"
                     >
                       <Check className="w-3.5 h-3.5" />
-                      Approve & Execute
+                      {req.status === 'PARTIALLY_APPROVED' ? 'Final Sign-off & Execute' : (req.requires_dual_approval ? 'Provide 1st Approval' : 'Approve & Execute')}
                     </button>
                     <button
                       onClick={() => handleAction(req.id, 'REJECT')}

@@ -78,6 +78,28 @@ def health():
 async def startup_seed():
     db = SessionLocal()
     try:
+        # Schema migration check: Ensure dual-control columns exist
+        from sqlalchemy import text
+        try:
+            with engine.connect() as conn:
+                # Check for approval_requests dual control columns
+                cols_result = conn.execute(text("PRAGMA table_info(approval_requests)"))
+                existing_cols = [row[1] for row in cols_result.fetchall()]
+                new_cols = [
+                    ("first_approver_id", "VARCHAR(36)"),
+                    ("first_approved_at", "DATETIME"),
+                    ("second_approver_id", "VARCHAR(36)"),
+                    ("second_approved_at", "DATETIME"),
+                    ("expires_at", "DATETIME"),
+                    ("requires_dual_approval", "BOOLEAN DEFAULT 0")
+                ]
+                for col_name, col_type in new_cols:
+                    if col_name not in existing_cols:
+                        conn.execute(text(f"ALTER TABLE approval_requests ADD COLUMN {col_name} {col_type}"))
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Schema auto-migration check: {e}")
+
         # Check if already seeded
         if db.query(Organization).first():
             logger.info("Database already seeded.")

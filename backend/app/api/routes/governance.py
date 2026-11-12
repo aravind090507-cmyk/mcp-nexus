@@ -8,6 +8,7 @@ from app.services.mcp_manager import MCPManager
 from app.services.audit_service import AuditService
 from app.api.deps import get_current_user, require_permission
 from app.core.permissions import PermissionEnum, RoleEnum
+from app.services.policy_engine import PolicyEngine
 import datetime
 
 router = APIRouter(prefix="/governance", tags=["Governance, Security & Approvals"])
@@ -35,6 +36,12 @@ def list_approvals(
             parameters=r.parameters or {},
             risk_level=r.risk_level,
             status=r.status,
+            requires_dual_approval=r.requires_dual_approval or False,
+            first_approver_name=r.first_approver.full_name if r.first_approver else None,
+            first_approved_at=r.first_approved_at,
+            second_approver_name=r.second_approver.full_name if r.second_approver else None,
+            second_approved_at=r.second_approved_at,
+            expires_at=r.expires_at,
             created_at=r.created_at,
             reviewed_at=r.reviewed_at
         ))
@@ -51,31 +58,103 @@ async def review_approval(
     if not req:
         raise HTTPException(status_code=404, detail="Approval request not found.")
 
-    if req.status != "PENDING":
+    # 1. Expiration Verification
+    now = datetime.datetime.utcnow()
+    if req.expires_at and now > req.expires_at and req.status in ("PENDING", "PARTIALLY_APPROVED"):
+        req.status = "EXPIRED"
+        db.commit()
+        AuditService.record(
+            db, "EXPIRE_APPROVAL", "APPROVAL", req.id,
+            user_name="System", role="SYSTEM",
+            details=f"Approval request #{req.id[:8]} expired after SLA window."
+        )
+        raise HTTPException(status_code=400, detail="Approval request has expired and can no longer be processed.")
+
+    if req.status in ("APPROVED", "EXECUTED", "REJECTED", "EXPIRED"):
         raise HTTPException(status_code=400, detail=f"Request is already resolved as '{req.status}'.")
+
+    # 2. Self-Approval Prevention Check
+    if req.requesting_user_id == current_user.id:
+        PolicyEngine._log_security_event(
+            db, "UNAUTHORIZED_APPROVAL_ATTEMPT", "HIGH",
+            current_user.email, req.tool.name if req.tool else "UNKNOWN_TOOL",
+            f"User '{current_user.email}' attempted to self-approve operation #{req.id[:8]}."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Self-approval is strictly forbidden by enterprise dual-control governance policy. A distinct authorized administrator must review this request."
+        )
 
     action = action_data.action.upper()
     if action not in ("APPROVE", "REJECT"):
         raise HTTPException(status_code=400, detail="Action must be APPROVE or REJECT.")
 
-    req.reviewed_by = current_user.id
-    req.reviewed_at = datetime.datetime.utcnow()
-    req.reason = action_data.reason
-
+    # 3. REJECT ACTION
     if action == "REJECT":
         req.status = "REJECTED"
+        req.reviewed_by = current_user.id
+        req.reviewed_at = now
+        req.reason = action_data.reason or "Rejected by administrative reviewer"
         db.commit()
+
         AuditService.record(
             db, "REJECT_APPROVAL", "APPROVAL", req.id,
             user_name=current_user.full_name, role=current_user.role,
-            details=f"Rejected approval request for tool '{req.tool.name}'. Reason: {action_data.reason}"
+            details=f"Rejected approval request for tool '{req.tool.name if req.tool else req.tool_id}'. Reason: {req.reason}"
         )
-        return {"status": "REJECTED", "message": "Approval request was rejected."}
+        PolicyEngine._log_security_event(
+            db, "APPROVAL_DECISION", "MEDIUM", current_user.email, req.tool.name if req.tool else req.tool_id,
+            f"Approval request #{req.id[:8]} was REJECTED by {current_user.email}."
+        )
+        return {"status": "REJECTED", "message": "Approval request was rejected.", "details": req.reason}
 
-    # APPROVE: Execute the deferred tool action
-    req.status = "APPROVED"
-    db.commit()
+    # 4. APPROVE ACTION (Dual-Control vs Single-Control)
+    if req.requires_dual_approval:
+        if req.first_approver_id is None:
+            # First approval recorded
+            req.first_approver_id = current_user.id
+            req.first_approved_at = now
+            req.status = "PARTIALLY_APPROVED"
+            req.reason = action_data.reason
+            db.commit()
 
+            AuditService.record(
+                db, "PARTIAL_APPROVAL", "APPROVAL", req.id,
+                user_name=current_user.full_name, role=current_user.role,
+                details=f"First approval granted by {current_user.full_name}. Awaiting second distinct administrator sign-off."
+            )
+            return {
+                "status": "PARTIALLY_APPROVED",
+                "message": "First approval recorded. Dual-control policy requires a second distinct authorized approver before execution can proceed.",
+                "first_approver": current_user.full_name
+            }
+        else:
+            # Second approval attempt: ensure not the same approver
+            if req.first_approver_id == current_user.id:
+                PolicyEngine._log_security_event(
+                    db, "DUAL_APPROVAL_VIOLATION", "HIGH", current_user.email, req.tool.name if req.tool else req.tool_id,
+                    f"User '{current_user.email}' attempted duplicate sign-off for dual-control request #{req.id[:8]}."
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail="Dual-control policy requires two distinct approvers. You have already provided the first approval."
+                )
+
+            req.second_approver_id = current_user.id
+            req.second_approved_at = now
+            req.reviewed_by = current_user.id
+            req.reviewed_at = now
+            req.status = "APPROVED"
+            db.commit()
+    else:
+        # Standard Single Approval
+        req.reviewed_by = current_user.id
+        req.reviewed_at = now
+        req.reason = action_data.reason
+        req.status = "APPROVED"
+        db.commit()
+
+    # Once fully APPROVED -> Execute the deferred tool action
     exec_result, duration_ms, is_success, err = await MCPManager.execute_tool(
         db, req.server, req.tool, req.parameters or {}
     )
@@ -86,7 +165,11 @@ async def review_approval(
     AuditService.record(
         db, "APPROVE_AND_EXECUTE", "APPROVAL", req.id,
         user_name=current_user.full_name, role=current_user.role,
-        details=f"Approved and executed sensitive tool '{req.tool.name}' (Duration: {duration_ms}ms)"
+        details=f"Approved and executed sensitive tool '{req.tool.name}' (Result: {'SUCCESS' if is_success else 'FAILED'}, Duration: {duration_ms}ms)"
+    )
+    PolicyEngine._log_security_event(
+        db, "SENSITIVE_TOOL_EXEC", req.risk_level, current_user.email, req.tool.name,
+        f"Sensitive tool '{req.tool.name}' executed following dual-control governance approval."
     )
 
     return {

@@ -170,6 +170,12 @@ class ApprovalOut(BaseModel):
     parameters: Dict[str, Any]
     risk_level: str
     status: str
+    requires_dual_approval: bool = False
+    first_approver_name: Optional[str] = None
+    first_approved_at: Optional[datetime] = None
+    second_approver_name: Optional[str] = None
+    second_approved_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
     created_at: datetime
     reviewed_at: Optional[datetime] = None
 

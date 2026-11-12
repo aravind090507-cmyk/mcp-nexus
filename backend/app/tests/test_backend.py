@@ -14,7 +14,28 @@ def client():
 @pytest.fixture(scope="module")
 def admin_headers(client):
     res = client.post("/api/v1/auth/switch-role", json={"role": "SUPER_ADMIN"})
-    assert res.status_code == 200, f"Failed to get admin token: {res.text}"
+    assert res.status_code == 200, f"Failed to get super admin token: {res.text}"
+    token = res.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+@pytest.fixture(scope="module")
+def ops_admin_headers(client):
+    res = client.post("/api/v1/auth/switch-role", json={"role": "ADMIN"})
+    assert res.status_code == 200, f"Failed to get ops admin token: {res.text}"
+    token = res.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+@pytest.fixture(scope="module")
+def dev_headers(client):
+    res = client.post("/api/v1/auth/switch-role", json={"role": "DEVELOPER"})
+    assert res.status_code == 200, f"Failed to get developer token: {res.text}"
+    token = res.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+@pytest.fixture(scope="module")
+def operator_headers(client):
+    res = client.post("/api/v1/auth/switch-role", json={"role": "OPERATOR"})
+    assert res.status_code == 200, f"Failed to get operator token: {res.text}"
     token = res.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
 
@@ -159,7 +180,7 @@ def test_sensitive_tool_approval_enforcement(client, admin_headers):
     assert data["is_success"] is False
     assert "Approval request" in data["error"] or "approval_required" in str(data["result"])
 
-def test_approval_workflow_review(client, admin_headers):
+def test_approval_workflow_review(client, admin_headers, ops_admin_headers):
     # Fetch pending approvals
     approvals_res = client.get("/api/v1/governance/approvals?status_filter=PENDING", headers=admin_headers)
     assert approvals_res.status_code == 200
@@ -167,14 +188,79 @@ def test_approval_workflow_review(client, admin_headers):
     assert len(approvals) >= 1
     target_approval = approvals[0]
 
-    # Reject the approval request
+    # Verify self-approval rejection: Super Admin requested this operation, so Super Admin cannot review their own request
+    self_approve_res = client.post(
+        f"/api/v1/governance/approvals/{target_approval['id']}/action",
+        json={"action": "APPROVE"},
+        headers=admin_headers
+    )
+    assert self_approve_res.status_code == 403
+    assert "Self-approval is strictly forbidden" in self_approve_res.json()["detail"]
+
+    # Distinct authorized administrator (ADMIN role) reviews and rejects the approval request
     action_res = client.post(
         f"/api/v1/governance/approvals/{target_approval['id']}/action",
-        json={"action": "REJECT", "notes": "Halted by Safety Auditor pending physical ultrasonic inspection."},
-        headers=admin_headers
+        json={"action": "REJECT", "reason": "Halted by Safety Auditor pending physical ultrasonic inspection."},
+        headers=ops_admin_headers
     )
     assert action_res.status_code == 200
     assert action_res.json()["status"] == "REJECTED"
+
+def test_dual_person_approval_workflow(client, dev_headers, ops_admin_headers, admin_headers):
+    """
+    Verify genuine dual-person approval governance for CRITICAL operations:
+    1. Developer triggers critical tool in playground -> requires approval
+    2. Approver 1 (Admin) provides first sign-off -> status: PARTIALLY_APPROVED
+    3. Approver 1 attempts duplicate sign-off -> rejected with 400
+    4. Approver 2 (Super Admin) provides second sign-off -> status: EXECUTED
+    """
+    # 1. Developer triggers critical equipment report
+    payload = {
+        "tool_name": "report_equipment_issue",
+        "arguments": {
+            "equipment_id": "EQP-GEN-1200",
+            "severity": "CRITICAL",
+            "description": "Bearing temperature runaway on emergency generator."
+        }
+    }
+    exec_res = client.post("/api/v1/tools/execute", json=payload, headers=dev_headers)
+    assert exec_res.status_code == 200
+    app_id = exec_res.json()["result"]["approval_id"]
+
+    # 2. First Approver (Ops Admin) reviews and approves -> PARTIALLY_APPROVED
+    first_app_res = client.post(
+        f"/api/v1/governance/approvals/{app_id}/action",
+        json={"action": "APPROVE", "reason": "Plant engineer initial clearance granted."},
+        headers=ops_admin_headers
+    )
+    assert first_app_res.status_code == 200
+    assert first_app_res.json()["status"] == "PARTIALLY_APPROVED"
+
+    # 3. Duplicate sign-off attempt by same approver -> 400 Bad Request
+    dup_res = client.post(
+        f"/api/v1/governance/approvals/{app_id}/action",
+        json={"action": "APPROVE", "reason": "Duplicate attempt."},
+        headers=ops_admin_headers
+    )
+    assert dup_res.status_code == 400
+    assert "two distinct approvers" in dup_res.json()["detail"].lower()
+
+    # 4. Second distinct Approver (Super Admin) provides final sign-off -> EXECUTED
+    final_app_res = client.post(
+        f"/api/v1/governance/approvals/{app_id}/action",
+        json={"action": "APPROVE", "reason": "Chief Safety Officer final concurrence."},
+        headers=admin_headers
+    )
+    assert final_app_res.status_code == 200
+    assert final_app_res.json()["status"] == "EXECUTED"
+
+def test_security_audit_events_logged(client, admin_headers):
+    """Verify that permission violations and unauthorized approval attempts are recorded in security events."""
+    sec_res = client.get("/api/v1/governance/security-events", headers=admin_headers)
+    assert sec_res.status_code == 200
+    events = sec_res.json()
+    event_types = {e["event_type"] for e in events}
+    assert "PERMISSION_VIOLATION" in event_types or "UNAUTHORIZED_APPROVAL_ATTEMPT" in event_types
 
 def test_tool_config_update(client, admin_headers):
     tools_res = client.get("/api/v1/tools", headers=admin_headers)

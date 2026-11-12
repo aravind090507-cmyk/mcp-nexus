@@ -95,7 +95,13 @@ export interface ApprovalRequest {
   operation_description: string;
   parameters: Record<string, any>;
   risk_level: 'HIGH' | 'CRITICAL';
-  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXECUTED' | 'EXECUTION_FAILED';
+  status: 'PENDING' | 'PARTIALLY_APPROVED' | 'APPROVED' | 'REJECTED' | 'EXPIRED' | 'EXECUTED' | 'EXECUTION_FAILED';
+  requires_dual_approval?: boolean;
+  first_approver_name?: string;
+  first_approved_at?: string;
+  second_approver_name?: string;
+  second_approved_at?: string;
+  expires_at?: string;
   created_at: string;
   reviewed_at?: string;
 }

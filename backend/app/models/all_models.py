@@ -148,14 +148,25 @@ class ApprovalRequest(Base):
     operation_description = Column(Text, nullable=False)
     parameters = Column(JSON, default=dict)
     risk_level = Column(String(50), default="HIGH")       # HIGH, CRITICAL
-    status = Column(String(50), default="PENDING")        # PENDING, APPROVED, REJECTED, EXECUTED
+    status = Column(String(50), default="PENDING")        # PENDING, PARTIALLY_APPROVED, APPROVED, REJECTED, EXPIRED, EXECUTED, EXECUTION_FAILED
     reason = Column(Text, nullable=True)
+
+    # Dual-Control Governance fields
+    requires_dual_approval = Column(Boolean, default=False)
+    first_approver_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    first_approved_at = Column(DateTime, nullable=True)
+    second_approver_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    second_approved_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+
     reviewed_by = Column(String(36), ForeignKey("users.id"), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     requesting_user = relationship("User", foreign_keys=[requesting_user_id], back_populates="approval_requests")
     reviewer = relationship("User", foreign_keys=[reviewed_by])
+    first_approver = relationship("User", foreign_keys=[first_approver_id])
+    second_approver = relationship("User", foreign_keys=[second_approver_id])
     server = relationship("MCPServer")
     tool = relationship("MCPTool")
     agent = relationship("AIAgent")
