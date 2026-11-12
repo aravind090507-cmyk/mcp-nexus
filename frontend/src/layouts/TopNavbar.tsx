@@ -35,6 +35,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({ onSearch }) => {
     { title: 'MCP Servers', path: '/servers', category: 'MANAGEMENT', desc: 'Register, inspect STDIO/HTTP MCP servers' },
     { title: 'Tool Registry & Playground', path: '/tools', category: 'MANAGEMENT', desc: 'Central tool discovery, policies & playground test' },
     { title: 'AI Agent Orchestration', path: '/agents', category: 'MANAGEMENT', desc: 'Cross-server multi-step AI orchestration' },
+    { title: 'Enterprise Workflows', path: '/workflows', category: 'MANAGEMENT', desc: 'Cross-server correlation dossier for civil engineering' },
     { title: 'Enterprise Integrations', path: '/integrations', category: 'MANAGEMENT', desc: 'ERP, SAP S/4HANA, Primavera, IoT SCADA' },
     { title: 'Access Control (RBAC)', path: '/governance/access-control', category: 'GOVERNANCE', desc: 'Role permissions matrix & active users' },
     { title: 'Security Policies', path: '/governance/policies', category: 'GOVERNANCE', desc: 'Policy guardrails, rate limits, sandbox constraints' },
