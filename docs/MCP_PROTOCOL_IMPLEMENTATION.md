@@ -1,8 +1,8 @@
 # MCP NEXUS — PROTOCOL IMPLEMENTATION ARCHITECTURE
 
 **Specification:** Model Context Protocol (MCP) — Official Specification 2024-11-05  
-**Transport Types Supported:** STDIO Subprocesses, Streamable HTTP (SSE), Standard HTTP POST  
-**Target Integration:** Python `mcp` SDK & JSON-RPC 2.0  
+**Transport Types Supported:** Official SDK STDIO Subprocesses, Streamable HTTP (SSE), Standard HTTP POST  
+**Target Integration:** Official Python `mcp` SDK (`mcp.client.stdio.stdio_client`, `ClientSession`) & JSON-RPC 2.0  
 
 ---
 
@@ -16,25 +16,40 @@ MCP NEXUS serves as an enterprise-grade control plane and centralized connection
 |                           (MCPConnectionManager)                              |
 +-------------------------------------------------------------------------------+
            |                                                      |
-           | [STDIO Transport]                                    | [HTTP_SSE Transport]
+           | [Official SDK STDIO Transport]                       | [HTTP_SSE Transport]
+           | (mcp.client.stdio.stdio_client + ClientSession)      |
            v                                                      v
-+-----------------------------+                        +------------------------+
-| Python Subprocess Exchange  |                        | httpx.AsyncClient /    |
-| (stdin / stdout JSON-RPC)   |                        | mcp.client.sse         |
-+-----------------------------+                        +------------------------+
-           |                                                      |
-           v                                                      v
-+-----------------------------+                        +------------------------+
-| Local MCP Server Containers |                        | Remote Cloud Endpoints |
-| (ERP, Inventory, Equipment) |                        | (Microservices, SaaS)  |
-+-----------------------------+                        +------------------------+
++----------------------------------------------------+   +----------------------+
+| Subprocess Execution via Official Python SDK       |   | httpx.AsyncClient /  |
+| - StdioServerParameters (cmd, args, env, encoding) |   | mcp.client.sse       |
+| - Dedicated Windows Proactor worker thread         |   +----------------------+
+| - ClientSession (initialize, ping, call_tool)      |              |
++----------------------------------------------------+              |
+           |                                                        |
+           v                                                        v
++-----------------------------+                          +----------------------+
+| Local MCP Server Containers |                          | Remote Microservices |
+| (ERP, Inventory, Equipment) |                          | (Cloud APIs, SaaS)   |
++-----------------------------+                          +----------------------+
 ```
+
+### 1.1 Official Python SDK STDIO Client Architecture
+
+MCP Nexus connects to STDIO-based MCP servers using the official Python MCP SDK (`mcp>=1.0.0`, currently running `mcp 2.3.0`):
+
+1. **`mcp.StdioServerParameters`**: Encapsulates executable path, arguments, environment variables, working directory, and encoding (`utf-8`).
+2. **`mcp.client.stdio.stdio_client`**: Asynchronous context manager yielding read and write memory streams over standard process pipes.
+3. **`mcp.ClientSession`**: Manages protocol handshake, capability exchange, bidirectional message framing, JSON-RPC schema compliance, and timeouts (`read_timeout_seconds`).
+4. **Windows Compatibility Engine**:
+   - On Windows, default event loops under some web server reload monitors (e.g., Uvicorn with `--reload`) initialize `_WindowsSelectorEventLoop`, which lacks asynchronous subprocess pipe support (`NotImplementedError`).
+   - `MCPClient` detects non-proactor loops on Windows and transparently dispatches SDK operations to a dedicated worker thread running a fresh `asyncio.WindowsProactorEventLoopPolicy().new_event_loop()`.
+   - Eliminates `NotImplementedError` while preserving zero custom JSON-RPC framing hacks.
 
 ---
 
 ## 2. Capability Negotiation & Handshake Sequence
 
-Every connection initiation executes standard JSON-RPC 2.0 handshake negotiation:
+The official `ClientSession.initialize()` executes standard JSON-RPC 2.0 handshake negotiation strictly adhering to specification `2024-11-05`:
 
 ### 2.1 Initialization Request
 ```json
@@ -50,7 +65,7 @@ Every connection initiation executes standard JSON-RPC 2.0 handshake negotiation
       "prompts": { "listChanged": true }
     },
     "clientInfo": {
-      "name": "MCP-Nexus-Control-Plane",
+      "name": "mcp-nexus-control-plane",
       "version": "1.0.0"
     }
   }
@@ -58,7 +73,7 @@ Every connection initiation executes standard JSON-RPC 2.0 handshake negotiation
 ```
 
 ### 2.2 Initialized Notification
-Immediately following receipt of the server's initialization response, the client dispatches the initialized notification:
+Immediately following receipt of the server's initialization response, `ClientSession.initialize()` dispatches the initialized notification:
 ```json
 {
   "jsonrpc": "2.0",
@@ -69,24 +84,24 @@ Immediately following receipt of the server's initialization response, the clien
 
 ---
 
-## 3. Discovered Primitives
+## 3. Discovered Primitives via Official SDK
 
-MCP NEXUS supports all three primary primitives of the MCP specification:
+MCP NEXUS supports all primary primitives of the MCP specification via native `ClientSession` methods:
 
-### 3.1 Tools Discovery (`tools/list` & `tools/call`)
-- Discovers available tools, parameter schemas (`inputSchema`), and descriptions.
-- Synchronously invokes tools with validated parameters.
+### 3.1 Tools Discovery & Execution (`session.list_tools()`, `session.call_tool()`)
+- Discovers available tools, typed parameter schemas (`inputSchema`), and descriptions directly into `ListToolsResult`.
+- Invokes tools with validated arguments, handling typed `CallToolResult` and unpacking `TextContent` and structured payload representations.
 
-### 3.2 Resources Discovery (`resources/list`)
+### 3.2 Resources Discovery (`session.list_resources()`)
 - Discovers structured data resources exposed by servers (e.g. `erp://projects/active`, `telemetry://sensors/vibration`, `inventory://catalog`).
-- Enables agents to read contextual datasets without mutating system state.
+- Returns typed `ListResourcesResult` enabling agents to read contextual datasets without mutating system state.
 
-### 3.3 Prompts Discovery (`prompts/list`)
+### 3.3 Prompts Discovery (`session.list_prompts()`)
 - Discovers server-provided prompt templates (e.g., `audit_project_milestones`, `analyze_machinery_vibration`, `evaluate_stock_shortages`).
-- Enables zero-shot domain-specific prompting tailored by backend server authors.
+- Returns typed `ListPromptsResult` enabling zero-shot domain-specific prompting tailored by backend server authors.
 
-### 3.4 Ping Handshake (`ping`)
-- Standard protocol ping verification measuring network and subprocess latency down to fractional milliseconds.
+### 3.4 Ping Handshake (`session.send_ping()`)
+- Official protocol ping verification measuring subprocess round-trip latency down to fractional milliseconds.
 
 ---
 

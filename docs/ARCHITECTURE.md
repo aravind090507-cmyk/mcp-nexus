@@ -116,8 +116,10 @@ MCP NEXUS adheres strictly to the official Model Context Protocol JSON-RPC 2.0 s
 
 The `MCPConnectionManager` (`backend/app/mcp/client.py`) provides thread-safe, non-blocking connection pooling and lifecycle supervision:
 
-### 3.1 Transport Support
-- **STDIO Subprocess Transport**: Spawns isolated OS subprocesses with standard I/O pipes. Employs non-blocking stream readers, output buffers, and process watchdog timers to eliminate hanging child processes.
+### 3.1 Official Python MCP SDK STDIO Transport
+- **Official SDK Client (`mcp.client.stdio.stdio_client` & `ClientSession`)**: STDIO communication executes through the official Python MCP SDK (`mcp>=1.0.0`, version 2.3.0) eliminating custom JSON-RPC request serialization and line-delimited stream parsing.
+- **`StdioServerParameters`**: Configures command, arguments, environment dictionary, and UTF-8 encoding.
+- **Windows Proactor Compatibility Architecture**: On Windows platforms under development servers utilizing `_WindowsSelectorEventLoop` (such as Uvicorn with `--reload`), asynchronous subprocess pipe operations trigger `NotImplementedError`. The `MCPClient` architecture transparently resolves this by dispatching SDK session operations to a dedicated worker thread via `asyncio.to_thread` utilizing a thread-isolated `asyncio.WindowsProactorEventLoopPolicy().new_event_loop()`. This guarantees 100% native SDK compliance with zero protocol monkeypatching or fallback to raw sockets.
 - **Streamable HTTP / SSE Transport**: Supports asynchronous HTTP connections with Server-Sent Events (`text/event-stream`) streaming for remote microservices.
 
 ### 3.2 Self-Healing Circuit Breaker State Machine

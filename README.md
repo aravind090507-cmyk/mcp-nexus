@@ -77,10 +77,12 @@ Built from the ground up to reflect the information density of Linear, the opera
 
 ## Key Capabilities
 
-### 1. Protocol-Aware MCP Server Management
+### 1. Official MCP Python SDK Transport & Server Management
+- **Official SDK Client (`mcp.client.stdio.stdio_client` & `ClientSession`)**: STDIO communication is powered directly by the official Python MCP SDK (`mcp>=1.0.0`, version 2.3.0), utilizing `StdioServerParameters` and `ClientSession` with native protocol framing.
+- **Windows Proactor Compatibility Architecture**: Transparent worker-thread isolation ensures seamless `asyncio.create_subprocess_exec` execution across Windows development environments (including Uvicorn `--reload` loops) with zero custom JSON-RPC workarounds.
 - **Specification Compliance**: Fully conforms to the Model Context Protocol JSON-RPC 2.0 specification (`2024-11-05`).
 - **Dual Transports**: Bidirectional communication over **STDIO** subprocesses and **Streamable HTTP / SSE**.
-- **Capability Negotiation & Ping**: Negotiates client/server capabilities; measures round-trip latency via protocol `ping`.
+- **Capability Negotiation & Ping**: Negotiates client/server capabilities; measures round-trip latency via official protocol `ping`.
 - **Resources & Prompts Discovery**: Dynamically indexes exposed resources (`resources/list`) and prompts (`prompts/list`).
 - **Endpoint Auto-Discovery**: Probes candidate executables or URLs (`POST /servers/discover`), validates schemas, and presents an interactive admin approval modal.
 - **3 Industrial Domain Servers**:

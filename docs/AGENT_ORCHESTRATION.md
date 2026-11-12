@@ -100,7 +100,7 @@ The orchestrator executes a 10-step sequence across 3 independent MCP servers:
 3. **Discover Relevant MCP Tools Dynamically:** Queries active database records registered to online MCP servers (`get_project_status`, `get_maintenance_schedule`, `get_low_stock_items`).
 4. **Check User Permissions:** Evaluates backend RBAC (`AGENTS_ORCHESTRATE`) and Policy Engine dynamic rules before dispatch.
 5. **Create Execution Plan:** Formulates a concurrent-safe read-only dispatch plan bounded by `max_execution_steps`.
-6. **Execute Concurrent Read-Only Tool Calls:** Dispatches parallel JSON-RPC calls via `asyncio.gather` through `MCPManager`.
+6. **Execute Concurrent Read-Only Tool Calls:** Dispatches parallel tool calls via `asyncio.gather` through `MCPManager`, utilizing the official Python MCP SDK (`mcp.client.stdio.stdio_client` and `ClientSession.call_tool`).
 7. **Collect Responses:** Gathers parsed JSON responses; handles missing servers or timeouts gracefully without terminating.
 8. **Correlate Domain Information:** Cross-references data by project code, machinery site, and warehouse location.
 9. **Generate Structured Risk Assessment:** The `RiskIntelligenceEngine` calculates project risk scores (0–100) and classifications (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`).

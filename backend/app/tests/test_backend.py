@@ -980,6 +980,101 @@ def test_regression_partial_workflow_failure_reporting(client, admin_headers):
         # Re-enable
         client.put(f"/api/v1/servers/{inv_srv['id']}", json={"is_enabled": True}, headers=admin_headers)
 
+# ==============================================================================
+# PHASE 5: OFFICIAL MCP SDK TRANSPORT TESTS
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_official_sdk_stdio_client_session_types():
+    """Verify that MCPClient invokes official stdio_client and provides authentic ClientSession instances."""
+    from app.mcp.client import MCPClient
+    from mcp import ClientSession
+    
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    erp_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "erp_server.py")
+    client = MCPClient(args=[erp_script])
+    
+    session_verified = False
+    init_res_verified = False
+    
+    async def _verify_types(session: ClientSession, init_res: Any):
+        nonlocal session_verified, init_res_verified
+        assert isinstance(session, ClientSession)
+        session_verified = True
+        assert hasattr(init_res, "protocol_version")
+        assert init_res.protocol_version == "2024-11-05"
+        init_res_verified = True
+        return "OK"
+        
+    res = await client._run_sdk_stdio_operation(_verify_types)
+    assert res == "OK"
+    assert session_verified is True
+    assert init_res_verified is True
+
+@pytest.mark.asyncio
+async def test_official_sdk_ping_exchange():
+    """Verify that MCPClient.ping() executes official ClientSession.send_ping() without manual JSON-RPC."""
+    from app.mcp.client import MCPClient
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    erp_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "erp_server.py")
+    client = MCPClient(args=[erp_script])
+    
+    latency = await client.ping()
+    assert isinstance(latency, float)
+    assert latency > 0
+
+@pytest.mark.asyncio
+async def test_official_sdk_tool_discovery_typed():
+    """Verify that MCPClient.list_tools() invokes official session.list_tools() and produces valid tool schemas."""
+    from app.mcp.client import MCPClient
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    eq_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "equipment_server.py")
+    client = MCPClient(args=[eq_script])
+    
+    tools = await client.list_tools()
+    assert isinstance(tools, list)
+    assert len(tools) == 3
+    tool_map = {t["name"]: t for t in tools}
+    assert "get_equipment_status" in tool_map
+    assert "inputSchema" in tool_map["get_equipment_status"]
+    assert isinstance(tool_map["get_equipment_status"]["inputSchema"], dict)
+
+@pytest.mark.asyncio
+async def test_official_sdk_resource_and_prompt_discovery():
+    """Verify that MCPClient discovers resources and prompts using official SDK list_resources/list_prompts."""
+    from app.mcp.client import MCPClient
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    erp_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "erp_server.py")
+    client = MCPClient(args=[erp_script])
+    
+    resources = await client.list_resources()
+    assert isinstance(resources, list)
+    assert len(resources) == 2
+    uris = [r["uri"] for r in resources]
+    assert "erp://projects/specs" in uris
+    
+    prompts = await client.list_prompts()
+    assert isinstance(prompts, list)
+    assert len(prompts) == 1
+    assert prompts[0]["name"] == "audit_project_milestones"
+
+@pytest.mark.asyncio
+async def test_official_sdk_call_tool_structured_content():
+    """Verify that MCPClient.call_tool() invokes official session.call_tool() and parses JSON text content."""
+    from app.mcp.client import MCPClient
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    inv_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "inventory_server.py")
+    client = MCPClient(args=[inv_script])
+    
+    res, duration_ms = await client.call_tool("get_low_stock_items", {"threshold_multiplier": 1.0})
+    assert duration_ms > 0
+    assert "content" in res
+    assert isinstance(res["content"], list)
+    assert res.get("isError") is False
+    assert "parsed" in res
+    assert res["parsed"]["low_stock_items_count"] >= 1
+
+
 
 
 

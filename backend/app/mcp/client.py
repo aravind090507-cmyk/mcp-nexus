@@ -7,8 +7,10 @@ import uuid
 import shutil
 import subprocess
 from datetime import datetime
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Callable
 import httpx
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from app.mcp.protocol import JSONRPCMessage, format_jsonrpc_response
 
 class MCPClientError(Exception):
@@ -92,198 +94,108 @@ class MCPClient:
 
         return cmd, resolved_args, cwd
 
-    @staticmethod
-    def _sync_stdio_exchange(cmd_list: List[str], requests: List[Dict[str, Any]], env: Dict[str, str], cwd: Optional[str]) -> List[Dict[str, Any]]:
+    async def _run_sdk_stdio_operation(self, op_fn: Callable[[ClientSession, Any], Any]) -> Any:
         """
-        Synchronous STDIO exchange executed in a background worker thread.
-        Universally compatible across all OS environments and event loops (Selector and Proactor).
+        Executes an operation using the official Python MCP SDK (stdio_client, StdioServerParameters, ClientSession).
+        Isolates execution inside a Windows-compatible Proactor worker thread when running under non-proactor loops,
+        ensuring 100% reliable asynchronous subprocess lifecycle and protocol framing without custom JSON-RPC.
         """
-        try:
-            proc = subprocess.Popen(
-                cmd_list,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                bufsize=1,
-                env=env,
-                cwd=cwd
-            )
-        except FileNotFoundError:
-            raise MCPClientError(f"Command not found or executable unavailable: '{cmd_list[0]}'")
-        except Exception as e:
-            raise MCPClientError(f"Failed to start MCP server subprocess ({cmd_list}): {str(e)}")
+        cmd, resolved_args, cwd = self._resolve_command_and_args()
+        cmd_list = [cmd] + resolved_args
 
-        responses = []
-        try:
-            for req in requests:
-                req_line = json.dumps(req) + "\n"
-                proc.stdin.write(req_line)
-                proc.stdin.flush()
-
-                if "id" not in req:
-                    continue
-
-                line = proc.stdout.readline()
-                if not line:
-                    err = proc.stderr.read().strip() if proc.stderr else "Process terminated without error output."
-                    raise MCPClientError(f"Server closed stream prematurely. Stderr: {err}")
-
-                resp_text = line.strip()
-                if not resp_text:
-                    continue
-                try:
-                    resp_data = json.loads(resp_text)
-                    responses.append(resp_data)
-                except json.JSONDecodeError:
-                    raise MCPClientError(f"Server returned non-JSON response: '{resp_text[:120]}'")
-
-        finally:
-            try:
-                proc.terminate()
-                proc.wait(timeout=1.5)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-
-        return responses
-
-    async def _execute_stdio_exchange(self, requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Executes a sequence of JSON-RPC requests against a STDIO MCP server process.
-        Safely captures stdout and stderr with timeout guards.
-        Transparently handles Windows SelectorEventLoop via worker thread.
-        """
         env = os.environ.copy()
         env.update(self.env_vars)
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
 
-        cmd, resolved_args, cwd = self._resolve_command_and_args()
-        cmd_list = [cmd] + resolved_args
+        server_params = StdioServerParameters(
+            command=cmd,
+            args=resolved_args,
+            env=env,
+            cwd=cwd,
+            encoding="utf-8"
+        )
 
-        # Detect whether current asyncio loop supports subprocesses
+        def _format_exception(exc: BaseException) -> str:
+            if hasattr(exc, "exceptions") and exc.exceptions:
+                return "; ".join(_format_exception(sub) for sub in exc.exceptions)
+            return str(exc)
+
+        async def _sdk_flow():
+            try:
+                async with stdio_client(server_params) as (read_stream, write_stream):
+                    async with ClientSession(read_stream, write_stream, read_timeout_seconds=float(self.timeout)) as session:
+                        init_result = await session.initialize()
+                        return await op_fn(session, init_result)
+            except FileNotFoundError:
+                raise MCPClientError(f"Command not found or executable unavailable: '{cmd}'")
+            except (Exception, BaseExceptionGroup) as e:
+                err_text = _format_exception(e)
+                if "timed out" in err_text.lower():
+                    raise MCPClientError(f"MCP server timed out after {self.timeout}s: {err_text}")
+                elif "connection closed" in err_text.lower() or "closed stream" in err_text.lower():
+                    raise MCPClientError(f"Server closed stream prematurely. Stderr: {err_text}")
+                elif isinstance(e, MCPClientError):
+                    raise e
+                raise MCPClientError(f"Failed to start MCP server subprocess ({cmd_list}): {err_text}")
+
         loop = asyncio.get_running_loop()
         is_proactor = isinstance(loop, getattr(asyncio, "ProactorEventLoop", type(None)))
 
-        # On Windows when running under SelectorEventLoop (e.g. Uvicorn with reload),
-        # create_subprocess_exec raises NotImplementedError.
-        # Fall back to thread-safe execution via subprocess.Popen in asyncio.to_thread.
         if sys.platform == "win32" and not is_proactor:
+            def _thread_worker():
+                worker_loop = asyncio.WindowsProactorEventLoopPolicy().new_event_loop()
+                asyncio.set_event_loop(worker_loop)
+                try:
+                    return worker_loop.run_until_complete(_sdk_flow())
+                finally:
+                    try:
+                        pending = asyncio.all_tasks(worker_loop)
+                        for t in pending:
+                            t.cancel()
+                        if pending:
+                            worker_loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    except Exception:
+                        pass
+                    worker_loop.close()
+
             try:
                 return await asyncio.wait_for(
-                    asyncio.to_thread(self._sync_stdio_exchange, cmd_list, requests, env, cwd),
-                    timeout=float(self.timeout * max(1, len(requests)) + 2.0)
+                    asyncio.to_thread(_thread_worker),
+                    timeout=float(self.timeout + 3.0)
                 )
             except asyncio.TimeoutError:
-                raise MCPClientError(f"MCP server timed out after {self.timeout}s.")
-            except Exception as e:
-                if isinstance(e, MCPClientError):
-                    raise e
-                raise MCPClientError(f"MCP execution error: {str(e)}")
-
-        # Otherwise, attempt native async subprocess
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd_list,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                cwd=cwd
-            )
-        except NotImplementedError:
-            # Fallback to thread-safe execution if loop doesn't support subprocesses
-            return await asyncio.wait_for(
-                asyncio.to_thread(self._sync_stdio_exchange, cmd_list, requests, env, cwd),
-                timeout=float(self.timeout * max(1, len(requests)) + 2.0)
-            )
-        except FileNotFoundError:
-            raise MCPClientError(f"Command not found or executable unavailable: '{cmd}'")
-        except Exception as e:
-            raise MCPClientError(f"Failed to start MCP server subprocess ({cmd_list}): {str(e)}")
-
-        responses = []
-        try:
-            for req in requests:
-                req_line = json.dumps(req) + "\n"
-                proc.stdin.write(req_line.encode("utf-8"))
-                await proc.stdin.drain()
-
-                # If request does not expect response (notification)
-                if "id" not in req:
-                    continue
-
-                try:
-                    line_bytes = await asyncio.wait_for(proc.stdout.readline(), timeout=self.timeout)
-                except asyncio.TimeoutError:
-                    raise MCPClientError(f"MCP server timed out after {self.timeout}s waiting for JSON-RPC response.")
-
-                if not line_bytes:
-                    err_bytes = await proc.stderr.read()
-                    err_msg = err_bytes.decode("utf-8", errors="replace").strip() if err_bytes else "Process terminated without error output."
-                    raise MCPClientError(f"Server closed stream prematurely. Stderr: {err_msg}")
-                
-                resp_text = line_bytes.decode("utf-8").strip()
-                if not resp_text:
-                    continue
-                try:
-                    resp_data = json.loads(resp_text)
-                    responses.append(resp_data)
-                except json.JSONDecodeError:
-                    raise MCPClientError(f"Server returned non-JSON response: '{resp_text[:120]}'")
-
-        finally:
+                raise MCPClientError(f"MCP server timed out after {self.timeout}s waiting for response.")
+        else:
             try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=1.5)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-
-        return responses
+                return await asyncio.wait_for(
+                    _sdk_flow(),
+                    timeout=float(self.timeout + 3.0)
+                )
+            except asyncio.TimeoutError:
+                raise MCPClientError(f"MCP server timed out after {self.timeout}s waiting for response.")
 
     async def initialize(self) -> Tuple[Dict[str, Any], float]:
         """
         Performs protocol handshake and returns server info + latency in milliseconds.
+        Uses official MCP ClientSession.initialize() for STDIO transport.
         """
         start = time.perf_counter()
-        req_id = self._next_id()
-        init_req = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {"listChanged": True}
-                },
-                "clientInfo": {
-                    "name": "MCP-Nexus-Control-Plane",
-                    "version": "1.0.0"
-                }
-            }
-        }
-        notif_req = {
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        }
 
         if self.transport_type == "STDIO":
-            resps = await self._execute_stdio_exchange([init_req, notif_req])
+            async def _op(session: ClientSession, init_res: Any):
+                caps = getattr(init_res, "capabilities", None)
+                sinfo = getattr(init_res, "server_info", None)
+                caps_dict = caps.model_dump(exclude_none=True) if hasattr(caps, "model_dump") else (caps.dict(exclude_none=True) if hasattr(caps, "dict") else {})
+                sinfo_dict = sinfo.model_dump(exclude_none=True) if hasattr(sinfo, "model_dump") else (sinfo.dict(exclude_none=True) if hasattr(sinfo, "dict") else {})
+                return {
+                    "protocolVersion": getattr(init_res, "protocol_version", "2024-11-05"),
+                    "serverInfo": sinfo_dict,
+                    "capabilities": caps_dict
+                }
+            res_dict = await self._run_sdk_stdio_operation(_op)
             duration_ms = (time.perf_counter() - start) * 1000.0
-            if not resps:
-                raise MCPClientError("No response received during MCP initialize handshake.")
-            first = resps[0]
-            if "error" in first:
-                raise MCPClientError(f"MCP Initialize failed: {first['error']}")
-            return first.get("result", {}), round(duration_ms, 2)
+            return res_dict, round(duration_ms, 2)
 
         elif self.transport_type in ("HTTP_SSE", "HTTP"):
             if not self.endpoint:
@@ -292,20 +204,18 @@ class MCPClient:
             # Try SSE client if available
             try:
                 from mcp.client.sse import sse_client
-                from mcp import ClientSession
                 async with sse_client(self.endpoint, timeout=self.timeout) as (read, write):
                     async with ClientSession(read, write) as session:
                         init_res = await session.initialize()
                         duration_ms = (time.perf_counter() - start) * 1000.0
                         return {
-                            "protocolVersion": getattr(init_res, "protocolVersion", "2024-11-05"),
-                            "serverInfo": getattr(init_res, "serverInfo", {"name": "SSE Server"}),
+                            "protocolVersion": getattr(init_res, "protocol_version", "2024-11-05"),
+                            "serverInfo": getattr(init_res, "server_info", {"name": "SSE Server"}),
                             "capabilities": getattr(init_res, "capabilities", {})
                         }, round(duration_ms, 2)
             except ImportError:
                 pass
-            except Exception as e:
-                # Fallback to direct HTTP JSON-RPC POST
+            except Exception:
                 pass
 
             # Direct HTTP JSON-RPC fallback
@@ -313,6 +223,16 @@ class MCPClient:
             if self.auth_token:
                 headers["Authorization"] = f"Bearer {self.auth_token}"
             
+            init_req = {
+                "jsonrpc": "2.0",
+                "id": self._next_id(),
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {"listChanged": True}},
+                    "clientInfo": {"name": "MCP-Nexus-Control-Plane", "version": "1.0.0"}
+                }
+            }
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 res = await client.post(self.endpoint, json=init_req, headers=headers)
                 duration_ms = (time.perf_counter() - start) * 1000.0
@@ -327,42 +247,36 @@ class MCPClient:
 
     async def list_tools(self) -> List[Dict[str, Any]]:
         """
-        Discovers tools available on this MCP server.
+        Discovers tools available on this MCP server using official ClientSession.list_tools().
         """
-        req_init = {
-            "jsonrpc": "2.0",
-            "id": self._next_id(),
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "MCP-Nexus", "version": "1.0.0"}
-            }
-        }
-        req_notif = {
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized"
-        }
-        req_tools = {
-            "jsonrpc": "2.0",
-            "id": self._next_id(),
-            "method": "tools/list",
-            "params": {}
-        }
-
         if self.transport_type == "STDIO":
-            resps = await self._execute_stdio_exchange([req_init, req_notif, req_tools])
-            for r in resps:
-                if r.get("id") == req_tools["id"]:
-                    if "error" in r:
-                        raise MCPClientError(f"tools/list failed: {r['error']}")
-                    return r.get("result", {}).get("tools", [])
-            return []
+            async def _op(session: ClientSession, init_res: Any):
+                tools_res = await session.list_tools()
+                discovered = []
+                for t in tools_res.tools:
+                    schema = getattr(t, "input_schema", getattr(t, "inputSchema", {}))
+                    if hasattr(schema, "model_dump"):
+                        schema = schema.model_dump(exclude_none=True)
+                    elif hasattr(schema, "dict"):
+                        schema = schema.dict(exclude_none=True)
+                    discovered.append({
+                        "name": t.name,
+                        "description": t.description or "",
+                        "inputSchema": schema or {}
+                    })
+                return discovered
+            return await self._run_sdk_stdio_operation(_op)
 
         elif self.transport_type in ("HTTP_SSE", "HTTP"):
             headers = {"Content-Type": "application/json"}
             if self.auth_token:
                 headers["Authorization"] = f"Bearer {self.auth_token}"
+            req_tools = {
+                "jsonrpc": "2.0",
+                "id": self._next_id(),
+                "method": "tools/list",
+                "params": {}
+            }
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 res = await client.post(self.endpoint, json=req_tools, headers=headers)
                 data = res.json()
@@ -373,54 +287,46 @@ class MCPClient:
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
         """
-        Invokes an MCP tool and returns (result_dict, duration_ms).
+        Invokes an MCP tool using official ClientSession.call_tool() and returns (result_dict, duration_ms).
         """
         start = time.perf_counter()
-        req_init = {
-            "jsonrpc": "2.0",
-            "id": self._next_id(),
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "MCP-Nexus", "version": "1.0.0"}
-            }
-        }
-        req_notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-        call_id = self._next_id()
-        req_call = {
-            "jsonrpc": "2.0",
-            "id": call_id,
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments
-            }
-        }
 
         if self.transport_type == "STDIO":
-            resps = await self._execute_stdio_exchange([req_init, req_notif, req_call])
+            async def _op(session: ClientSession, init_res: Any):
+                res = await session.call_tool(tool_name, arguments or {})
+                content_list = []
+                parsed_data = None
+                for c in res.content:
+                    c_type = getattr(c, "type", "text")
+                    c_text = getattr(c, "text", "")
+                    content_list.append({"type": c_type, "text": c_text})
+                    if c_type == "text" and parsed_data is None:
+                        try:
+                            parsed_data = json.loads(c_text)
+                        except Exception:
+                            pass
+                return {
+                    "content": content_list,
+                    "isError": getattr(res, "is_error", False),
+                    "parsed": parsed_data
+                }
+            res_dict = await self._run_sdk_stdio_operation(_op)
             duration_ms = (time.perf_counter() - start) * 1000.0
-            for r in resps:
-                if r.get("id") == call_id:
-                    if "error" in r:
-                        raise MCPClientError(f"Tool execution failed: {r['error']}")
-                    res_val = r.get("result", {})
-                    # Parse textual JSON content if provided
-                    if "content" in res_val and isinstance(res_val["content"], list):
-                        for c in res_val["content"]:
-                            if c.get("type") == "text":
-                                try:
-                                    res_val["parsed"] = json.loads(c.get("text", "{}"))
-                                except Exception:
-                                    pass
-                    return res_val, round(duration_ms, 2)
-            raise MCPClientError("No response received for tools/call.")
+            return res_dict, round(duration_ms, 2)
 
         elif self.transport_type in ("HTTP_SSE", "HTTP"):
             headers = {"Content-Type": "application/json"}
             if self.auth_token:
                 headers["Authorization"] = f"Bearer {self.auth_token}"
+            req_call = {
+                "jsonrpc": "2.0",
+                "id": self._next_id(),
+                "method": "tools/call",
+                "params": {
+                    "name": tool_name,
+                    "arguments": arguments
+                }
+            }
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 res = await client.post(self.endpoint, json=req_call, headers=headers)
                 duration_ms = (time.perf_counter() - start) * 1000.0
@@ -429,48 +335,48 @@ class MCPClient:
                     raise MCPClientError(f"Tool error: {data['error']}")
                 return data.get("result", {}), round(duration_ms, 2)
 
-        raise MCPClientError("Unsupported transport")
+        raise MCPClientError(f"Unsupported transport: {self.transport_type}")
 
     async def ping(self) -> float:
-        """Sends protocol ping request and returns latency in milliseconds."""
+        """Sends protocol ping request using official ClientSession.send_ping() and returns latency in milliseconds."""
         start = time.perf_counter()
-        req_ping = {"jsonrpc": "2.0", "id": self._next_id(), "method": "ping"}
         if self.transport_type == "STDIO":
-            resps = await self._execute_stdio_exchange([req_ping])
-            if not resps:
-                raise MCPClientError("No response received for ping.")
+            async def _op(session: ClientSession, init_res: Any):
+                await session.send_ping()
+                return True
+            await self._run_sdk_stdio_operation(_op)
             return round((time.perf_counter() - start) * 1000.0, 2)
         elif self.transport_type in ("HTTP_SSE", "HTTP"):
             headers = {"Content-Type": "application/json"}
             if self.auth_token:
                 headers["Authorization"] = f"Bearer {self.auth_token}"
+            req_ping = {"jsonrpc": "2.0", "id": self._next_id(), "method": "ping"}
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 res = await client.post(self.endpoint, json=req_ping, headers=headers)
                 return round((time.perf_counter() - start) * 1000.0, 2)
         raise MCPClientError(f"Unsupported transport: {self.transport_type}")
 
     async def list_resources(self) -> List[Dict[str, Any]]:
-        """Discovers resources available on this MCP server."""
-        req_init = {
-            "jsonrpc": "2.0", "id": self._next_id(), "method": "initialize",
-            "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "MCP-Nexus", "version": "1.0.0"}}
-        }
-        req_notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-        res_id = self._next_id()
-        req_res = {"jsonrpc": "2.0", "id": res_id, "method": "resources/list", "params": {}}
-
+        """Discovers resources available on this MCP server using official ClientSession.list_resources()."""
         if self.transport_type == "STDIO":
-            resps = await self._execute_stdio_exchange([req_init, req_notif, req_res])
-            for r in resps:
-                if r.get("id") == res_id:
-                    if "error" in r:
-                        raise MCPClientError(f"resources/list failed: {r['error']}")
-                    return r.get("result", {}).get("resources", [])
-            return []
+            async def _op(session: ClientSession, init_res: Any):
+                res_res = await session.list_resources()
+                resources = []
+                for r in res_res.resources:
+                    resources.append({
+                        "uri": str(r.uri),
+                        "name": r.name or "",
+                        "description": getattr(r, "description", "") or "",
+                        "mimeType": getattr(r, "mime_type", getattr(r, "mimeType", "application/json")) or "application/json"
+                    })
+                return resources
+            return await self._run_sdk_stdio_operation(_op)
+
         elif self.transport_type in ("HTTP_SSE", "HTTP"):
             headers = {"Content-Type": "application/json"}
             if self.auth_token:
                 headers["Authorization"] = f"Bearer {self.auth_token}"
+            req_res = {"jsonrpc": "2.0", "id": self._next_id(), "method": "resources/list", "params": {}}
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 res = await client.post(self.endpoint, json=req_res, headers=headers)
                 data = res.json()
@@ -480,27 +386,32 @@ class MCPClient:
         return []
 
     async def list_prompts(self) -> List[Dict[str, Any]]:
-        """Discovers prompts available on this MCP server."""
-        req_init = {
-            "jsonrpc": "2.0", "id": self._next_id(), "method": "initialize",
-            "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "MCP-Nexus", "version": "1.0.0"}}
-        }
-        req_notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-        prompt_id = self._next_id()
-        req_prompt = {"jsonrpc": "2.0", "id": prompt_id, "method": "prompts/list", "params": {}}
-
+        """Discovers prompts available on this MCP server using official ClientSession.list_prompts()."""
         if self.transport_type == "STDIO":
-            resps = await self._execute_stdio_exchange([req_init, req_notif, req_prompt])
-            for r in resps:
-                if r.get("id") == prompt_id:
-                    if "error" in r:
-                        raise MCPClientError(f"prompts/list failed: {r['error']}")
-                    return r.get("result", {}).get("prompts", [])
-            return []
+            async def _op(session: ClientSession, init_res: Any):
+                prm_res = await session.list_prompts()
+                prompts = []
+                for p in prm_res.prompts:
+                    args_list = []
+                    for a in (getattr(p, "arguments", []) or []):
+                        args_list.append({
+                            "name": a.name,
+                            "description": getattr(a, "description", "") or "",
+                            "required": getattr(a, "required", False)
+                        })
+                    prompts.append({
+                        "name": p.name,
+                        "description": getattr(p, "description", "") or "",
+                        "arguments": args_list
+                    })
+                return prompts
+            return await self._run_sdk_stdio_operation(_op)
+
         elif self.transport_type in ("HTTP_SSE", "HTTP"):
             headers = {"Content-Type": "application/json"}
             if self.auth_token:
                 headers["Authorization"] = f"Bearer {self.auth_token}"
+            req_prompt = {"jsonrpc": "2.0", "id": self._next_id(), "method": "prompts/list", "params": {}}
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 res = await client.post(self.endpoint, json=req_prompt, headers=headers)
                 data = res.json()
