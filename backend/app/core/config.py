@@ -1,0 +1,39 @@
+from pydantic_settings import BaseSettings
+from typing import List, Optional
+import os
+
+class Settings(BaseSettings):
+    PROJECT_NAME: str = "MCP NEXUS"
+    TAGLINE: str = "CONNECT. ORCHESTRATE. GOVERN."
+    VERSION: str = "1.0.0"
+    API_V1_PREFIX: str = "/api/v1"
+    
+    # Environment
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "Development")
+    DEBUG: bool = os.getenv("DEBUG", "True").lower() == "true"
+    
+    # Security
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "mcp-nexus-enterprise-vault-supersecret-key-2026-xyz")
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+    
+    # Database: Default to sqlite file for zero-config out-of-the-box run, easily switched to Postgres via DATABASE_URL
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./mcp_nexus.db")
+    
+    # LLM Provider Configuration
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "DEMO_DETERMINISTIC") # DEMO_DETERMINISTIC, OPENAI, ANTHROPIC, GEMINI
+    LLM_API_KEY: Optional[str] = os.getenv("LLM_API_KEY", None)
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-1.5-pro")
+    
+    # CORS
+    BACKEND_CORS_ORIGINS: List[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://localhost:8000"
+    ]
+    
+    class Config:
+        case_sensitive = True
+
+settings = Settings()

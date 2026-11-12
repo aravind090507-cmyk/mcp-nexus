@@ -1,0 +1,357 @@
+import sys
+import os
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from app.core.config import settings
+from app.database.session import Base, engine, SessionLocal
+from app.api.routes import (
+    auth, servers, tools, agents, governance, traces, metrics, topology, integrations, settings as settings_route
+)
+from app.models.all_models import (
+    Organization, User, MCPServer, MCPTool, AIAgent, IntegrationConfig, ExecutionTrace, SecurityEvent, AuditLog
+)
+from app.core.security import get_password_hash
+from app.core.permissions import RoleEnum
+from app.services.mcp_manager import MCPManager
+import logging
+import datetime
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("mcp-nexus")
+
+# Create database tables
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(
+    title=f"{settings.PROJECT_NAME} Control Plane",
+    description="Enterprise AI Integration, Orchestration & Governance Platform for Model Context Protocol (MCP)",
+    version=settings.VERSION,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register routes
+app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
+app.include_router(servers.router, prefix=settings.API_V1_PREFIX)
+app.include_router(tools.router, prefix=settings.API_V1_PREFIX)
+app.include_router(agents.router, prefix=settings.API_V1_PREFIX)
+app.include_router(governance.router, prefix=settings.API_V1_PREFIX)
+app.include_router(traces.router, prefix=settings.API_V1_PREFIX)
+app.include_router(metrics.router, prefix=settings.API_V1_PREFIX)
+app.include_router(topology.router, prefix=settings.API_V1_PREFIX)
+app.include_router(integrations.router, prefix=settings.API_V1_PREFIX)
+app.include_router(settings_route.router, prefix=settings.API_V1_PREFIX)
+
+@app.get("/")
+def root():
+    return {
+        "platform": settings.PROJECT_NAME,
+        "tagline": settings.TAGLINE,
+        "status": "OPERATIONAL",
+        "version": settings.VERSION,
+        "docs": "/docs",
+        "api_v1": settings.API_V1_PREFIX
+    }
+
+@app.get("/health")
+def health():
+    return {
+        "status": "HEALTHY",
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "database": "CONNECTED",
+        "governance_engine": "ACTIVE"
+    }
+
+# Seed realistic enterprise data on first run
+@app.on_event("startup")
+async def startup_seed():
+    db = SessionLocal()
+    try:
+        # Check if already seeded
+        if db.query(Organization).first():
+            logger.info("Database already seeded.")
+            return
+
+        logger.info("Initializing enterprise seed data for MCP NEXUS...")
+        
+        # 1. Organization
+        org = Organization(
+            name="Larsen & Toubro Heavy Civil & Digital IC",
+            slug="lt-heavy-civil",
+            description="L&T Infrastructure Control Center & AI Operations Plane",
+            tier="ENTERPRISE_MISSION_CRITICAL"
+        )
+        db.add(org)
+        db.commit()
+        db.refresh(org)
+
+        # 2. Users (Super Admin, Admin, Developer, Operator, Viewer)
+        users = [
+            User(
+                organization_id=org.id,
+                email="admin@mcp-nexus.enterprise",
+                full_name="Vikramaditya Sharma",
+                hashed_password=get_password_hash("NexusAdmin@2026"),
+                role=RoleEnum.SUPER_ADMIN.value,
+                department="AI & Platform Infrastructure"
+            ),
+            User(
+                organization_id=org.id,
+                email="ops.lead@mcp-nexus.enterprise",
+                full_name="Priya Sengupta",
+                hashed_password=get_password_hash("NexusOps@2026"),
+                role=RoleEnum.ADMIN.value,
+                department="Industrial Operations Control"
+            ),
+            User(
+                organization_id=org.id,
+                email="dev.arch@mcp-nexus.enterprise",
+                full_name="Karthik Narayan",
+                hashed_password=get_password_hash("NexusDev@2026"),
+                role=RoleEnum.DEVELOPER.value,
+                department="Smart Infrastructure Solutions"
+            ),
+            User(
+                organization_id=org.id,
+                email="operator.site@mcp-nexus.enterprise",
+                full_name="Rajesh Patel",
+                hashed_password=get_password_hash("NexusOp@2026"),
+                role=RoleEnum.OPERATOR.value,
+                department="Site Execution Wing"
+            ),
+            User(
+                organization_id=org.id,
+                email="audit.viewer@mcp-nexus.enterprise",
+                full_name="Ananya Roy",
+                hashed_password=get_password_hash("NexusView@2026"),
+                role=RoleEnum.VIEWER.value,
+                department="Quality & Safety Compliance"
+            )
+        ]
+        for u in users:
+            db.add(u)
+        db.commit()
+
+        # 3. Register the 3 Working MCP Demo Servers with absolute paths
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        erp_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "erp_server.py")
+        inv_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "inventory_server.py")
+        eqp_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "equipment_server.py")
+
+        s_erp = MCPServer(
+            organization_id=org.id,
+            name="ERP MCP Server",
+            identifier="mcp-srv-erp-core",
+            description="Enterprise resource planning integration for project contracts, milestones, and financials.",
+            transport_type="STDIO",
+            command=sys.executable,
+            args=[erp_script],
+            environment="Production",
+            status="HEALTHY",
+            avg_response_time_ms=32.4,
+            is_enabled=True,
+            total_calls=1240
+        )
+        s_inv = MCPServer(
+            organization_id=org.id,
+            name="Inventory MCP Server",
+            identifier="mcp-srv-inv-wh",
+            description="Centralized multi-site warehouse inventory and high-tensile material tracking.",
+            transport_type="STDIO",
+            command=sys.executable,
+            args=[inv_script],
+            environment="Production",
+            status="HEALTHY",
+            avg_response_time_ms=28.1,
+            is_enabled=True,
+            total_calls=2150
+        )
+        s_eqp = MCPServer(
+            organization_id=org.id,
+            name="Equipment MCP Server",
+            identifier="mcp-srv-eqp-fleet",
+            description="Heavy machinery telemetry, crane load monitors, and preventative maintenance logs.",
+            transport_type="STDIO",
+            command=sys.executable,
+            args=[eqp_script],
+            environment="Production",
+            status="HEALTHY",
+            avg_response_time_ms=41.8,
+            is_enabled=True,
+            total_calls=980
+        )
+        db.add_all([s_erp, s_inv, s_eqp])
+        db.commit()
+
+        # Discover tools automatically on all 3 servers
+        for s in [s_erp, s_inv, s_eqp]:
+            try:
+                await MCPManager.discover_tools(db, s)
+                logger.info(f"Discovered tools for {s.name}")
+            except Exception as e:
+                logger.error(f"Failed initial tool discovery on {s.name}: {e}")
+
+        # 4. Connected AI Agents
+        agent_infra = AIAgent(
+            organization_id=org.id,
+            name="Atlas Infrastructure Orchestrator",
+            identifier="agent-atlas-infra",
+            description="Autonomous multi-server agent coordinating EPC projects, equipment fleet telemetry, and supply chains.",
+            llm_provider="GEMINI",
+            model="gemini-1.5-pro",
+            status="ACTIVE",
+            max_execution_steps=6,
+            execution_policy="STRICT",
+            total_orchestrations=84,
+            system_prompt="You are Atlas, the principal industrial AI orchestrator for L&T operations."
+        )
+        agent_safety = AIAgent(
+            organization_id=org.id,
+            name="Aegis Safety & Compliance Agent",
+            identifier="agent-aegis-safety",
+            description="Specialized agent auditing machinery vibration alarms, overdue services, and workplace incidents.",
+            llm_provider="GEMINI",
+            model="gemini-1.5-flash",
+            status="ACTIVE",
+            max_execution_steps=4,
+            execution_policy="STRICT",
+            total_orchestrations=42,
+            system_prompt="You are Aegis, dedicated to zero-incident safety governance across all construction packages."
+        )
+        db.add_all([agent_infra, agent_safety])
+        db.commit()
+
+        # 5. Enterprise Integrations (ERP, Inventory, Equipment, HR, Procurement)
+        integs = [
+            IntegrationConfig(
+                name="SAP S/4HANA Enterprise ERP",
+                system_type="ERP",
+                vendor="SAP SE",
+                status="CONNECTED",
+                endpoint="https://erp-gateway.internal.lt.corp/v2",
+                linked_mcp_server="ERP MCP Server",
+                stats={"active_modules": ["PS", "CO", "FI", "MM"], "sync_records": 18204}
+            ),
+            IntegrationConfig(
+                name="Maximo Asset Management",
+                system_type="EQUIPMENT",
+                vendor="IBM Maximo",
+                status="CONNECTED",
+                endpoint="https://maximo.plant-machinery.lt.corp/api",
+                linked_mcp_server="Equipment MCP Server",
+                stats={"tracked_units": 412, "telemetry_refresh_sec": 5}
+            ),
+            IntegrationConfig(
+                name="WMS Warehouse Inventory Grid",
+                system_type="INVENTORY",
+                vendor="Oracle WMS Cloud",
+                status="CONNECTED",
+                endpoint="https://wms-hubs.supply.lt.corp/rest",
+                linked_mcp_server="Inventory MCP Server",
+                stats={"active_yards": 14, "sku_count": 8420}
+            ),
+            IntegrationConfig(
+                name="Workday Global Workforce & HR",
+                system_type="HR",
+                vendor="Workday",
+                status="CONNECTED",
+                endpoint="https://workday.lt.corp/api/v4",
+                linked_mcp_server=None,
+                stats={"certified_riggers": 128, "active_engineers": 940}
+            ),
+            IntegrationConfig(
+                name="Ariba E-Procurement Network",
+                system_type="PROCUREMENT",
+                vendor="SAP Ariba",
+                status="CONNECTED",
+                endpoint="https://ariba-b2b.procure.lt.corp/contracts",
+                linked_mcp_server=None,
+                stats={"rfq_in_flight": 32, "approved_vendors": 415}
+            )
+        ]
+        db.add_all(integs)
+
+        # 6. Seed Realistic Security Events
+        sec_events = [
+            SecurityEvent(
+                event_type="UNAUTHORIZED_ACCESS",
+                severity="HIGH",
+                actor="user:contractor_temp@partner.com",
+                target_resource="report_equipment_issue",
+                description="Contractor role attempted destructive machinery report without role elevation.",
+                ip_address="192.168.14.88"
+            ),
+            SecurityEvent(
+                event_type="POLICY_VIOLATION",
+                severity="MEDIUM",
+                actor="agent:agent-aegis-safety",
+                target_resource="get_financial_summary",
+                description="Safety agent attempted unassigned financial record retrieval; blocked by Cross-Server Boundary Guard.",
+                ip_address="10.20.10.4"
+            ),
+            SecurityEvent(
+                event_type="BLOCKED_TOOL",
+                severity="LOW",
+                actor="user:operator.site@mcp-nexus.enterprise",
+                target_resource="report_equipment_issue",
+                description="Execution blocked: required administrative approval queue submission.",
+                ip_address="192.168.1.42"
+            )
+        ]
+        db.add_all(sec_events)
+
+        # 7. Seed Initial Audit Logs
+        audits = [
+            AuditLog(
+                action="SYSTEM_INIT",
+                entity_type="PLATFORM",
+                entity_id="core",
+                user_name="Vikramaditya Sharma",
+                role="SUPER_ADMIN",
+                details="Initialized MCP NEXUS enterprise governance control plane."
+            ),
+            AuditLog(
+                action="REGISTER_SERVER",
+                entity_type="SERVER",
+                entity_id="mcp-srv-erp-core",
+                user_name="Vikramaditya Sharma",
+                role="SUPER_ADMIN",
+                details="Registered ERP MCP Server with STDIO transport."
+            ),
+            AuditLog(
+                action="REGISTER_SERVER",
+                entity_type="SERVER",
+                entity_id="mcp-srv-inv-wh",
+                user_name="Vikramaditya Sharma",
+                role="SUPER_ADMIN",
+                details="Registered Inventory MCP Server with STDIO transport."
+            ),
+            AuditLog(
+                action="REGISTER_SERVER",
+                entity_type="SERVER",
+                entity_id="mcp-srv-eqp-fleet",
+                user_name="Vikramaditya Sharma",
+                role="SUPER_ADMIN",
+                details="Registered Equipment MCP Server with STDIO transport."
+            )
+        ]
+        db.add_all(audits)
+        db.commit()
+        logger.info("Enterprise seed data populated successfully.")
+    except Exception as e:
+        logger.error(f"Error during startup seed: {e}")
+        db.rollback()
+    finally:
+        db.close()
