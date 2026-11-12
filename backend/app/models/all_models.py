@@ -194,6 +194,23 @@ class ExecutionTrace(Base):
     spans = Column(JSON, default=list)                   # Timeline breakdown array: [UserReq, AgentDec, PolicyVal, MCPDispatch, ToolExec, Resp]
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
+class SecurityPolicy(Base):
+    __tablename__ = "security_policies"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    action = Column(String(50), default="REQUIRE_APPROVAL") # ALLOW, DENY, REQUIRE_APPROVAL
+    risk_level = Column(String(50), default="HIGH")         # LOW, MEDIUM, HIGH, CRITICAL, ANY
+    environment = Column(String(50), default="ALL")         # ALL, PRODUCTION, STAGING, DEVELOPMENT
+    scope = Column(String(50), default="GLOBAL")            # GLOBAL, SERVER, TOOL
+    server_id = Column(String(36), nullable=True)
+    tool_pattern = Column(String(255), nullable=True)       # e.g. "report_equipment_issue", "delete_*", "*"
+    argument_conditions = Column(JSON, default=dict)        # e.g. {"severity": ["CRITICAL", "HIGH"]}
+    is_enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 class SecurityEvent(Base):
     __tablename__ = "security_events"
 

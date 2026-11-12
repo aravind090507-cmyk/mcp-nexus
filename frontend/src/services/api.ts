@@ -6,6 +6,7 @@ import type {
   ApprovalRequest,
   SecurityEvent,
   AuditLog,
+  SecurityPolicy,
   IntegrationConfig,
   CommandCenterMetrics,
   User,
@@ -147,7 +148,21 @@ export const api = {
     }),
   getSecurityEvents: () => fetchJSON<SecurityEvent[]>('/governance/security-events'),
   getAuditLogs: () => fetchJSON<AuditLog[]>('/governance/audit-logs'),
-  getPolicies: () => fetchJSON<any[]>('/governance/policies'),
+  getPolicies: () => fetchJSON<SecurityPolicy[]>('/governance/policies'),
+  createPolicy: (data: Partial<SecurityPolicy>) =>
+    fetchJSON<SecurityPolicy>('/governance/policies', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updatePolicy: (id: string, data: Partial<SecurityPolicy>) =>
+    fetchJSON<SecurityPolicy>(`/governance/policies/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deletePolicy: (id: string) =>
+    fetchJSON<{ success: boolean; message: string }>(`/governance/policies/${id}`, {
+      method: 'DELETE',
+    }),
 
   // Traces
   getTraces: (status?: string) =>

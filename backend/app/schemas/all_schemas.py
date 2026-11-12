@@ -183,6 +183,49 @@ class ApprovalActionRequest(BaseModel):
     action: str # APPROVE or REJECT
     reason: Optional[str] = None
 
+# --- SECURITY POLICIES ---
+class SecurityPolicyCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    action: str = "REQUIRE_APPROVAL" # ALLOW, DENY, REQUIRE_APPROVAL
+    risk_level: str = "HIGH"         # LOW, MEDIUM, HIGH, CRITICAL, ANY
+    environment: str = "ALL"         # ALL, PRODUCTION, STAGING, DEVELOPMENT
+    scope: str = "GLOBAL"            # GLOBAL, SERVER, TOOL
+    server_id: Optional[str] = None
+    tool_pattern: Optional[str] = None
+    argument_conditions: Dict[str, Any] = {}
+    is_enabled: bool = True
+
+class SecurityPolicyUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    action: Optional[str] = None
+    risk_level: Optional[str] = None
+    environment: Optional[str] = None
+    scope: Optional[str] = None
+    server_id: Optional[str] = None
+    tool_pattern: Optional[str] = None
+    argument_conditions: Optional[Dict[str, Any]] = None
+    is_enabled: Optional[bool] = None
+
+class SecurityPolicyOut(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    action: str
+    risk_level: str
+    environment: str
+    scope: str
+    server_id: Optional[str] = None
+    tool_pattern: Optional[str] = None
+    argument_conditions: Dict[str, Any] = {}
+    is_enabled: bool
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
 class SecurityEventOut(BaseModel):
     id: str
     event_type: str

@@ -2,8 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.database.session import get_db
-from app.models.all_models import ApprovalRequest, SecurityEvent, AuditLog, User, MCPServer, MCPTool
-from app.schemas.all_schemas import ApprovalOut, ApprovalActionRequest, SecurityEventOut, AuditLogOut
+from app.models.all_models import ApprovalRequest, SecurityEvent, AuditLog, User, MCPServer, MCPTool, SecurityPolicy
+from app.schemas.all_schemas import (
+    ApprovalOut, ApprovalActionRequest, SecurityEventOut, AuditLogOut,
+    SecurityPolicyCreate, SecurityPolicyUpdate, SecurityPolicyOut
+)
 from app.services.mcp_manager import MCPManager
 from app.services.audit_service import AuditService
 from app.api.deps import get_current_user, require_permission
@@ -200,42 +203,142 @@ def list_audit_logs(
 ):
     return db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(limit).all()
 
-@router.get("/policies")
-def get_security_policies():
+@router.get("/policies", response_model=List[SecurityPolicyOut])
+def get_security_policies(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     """
     Returns the active enterprise governance policies and constraints.
     """
-    return [
-        {
-            "id": "POL-001",
-            "name": "Destructive Operation Sign-off",
-            "scope": "ALL_SERVERS",
-            "risk_trigger": "CRITICAL",
-            "enforcement": "BLOCK_UNTIL_APPROVED",
-            "description": "Any tool operation that modifies equipment state, logs fatal breakdowns, or deletes assets requires Admin approval."
-        },
-        {
-            "id": "POL-002",
-            "name": "Least-Privilege Role Authorization (RBAC)",
-            "scope": "GLOBAL",
-            "risk_trigger": "ANY",
-            "enforcement": "REJECT_UNAUTHORIZED",
-            "description": "Tool execution is restricted to DEVELOPER, OPERATOR, ADMIN, and SUPER_ADMIN roles only."
-        },
-        {
-            "id": "POL-003",
-            "name": "Automated Protocol Handshake Verification",
-            "scope": "MCP_SERVERS",
-            "risk_trigger": "CONNECTION",
-            "enforcement": "DEGRADE_ON_FAILURE",
-            "description": "MCP servers failing to complete JSON-RPC 2.0 initialize sequence are marked DEGRADED."
-        },
-        {
-            "id": "POL-004",
-            "name": "Cross-Server Boundary Guard",
-            "scope": "AI_AGENTS",
-            "risk_trigger": "HIGH",
-            "enforcement": "AUDIT_AND_CONTAIN",
-            "description": "AI agents may only execute tools on explicitly assigned MCP servers."
-        }
-    ]
+    policies = db.query(SecurityPolicy).order_by(SecurityPolicy.created_at.desc()).all()
+    if not policies:
+        defaults = [
+            SecurityPolicy(
+                id="POL-001",
+                name="Destructive Operation Dual-Control Sign-off",
+                description="Any tool operation modifying critical assets or equipment requires two distinct administrative approvals.",
+                action="REQUIRE_APPROVAL",
+                risk_level="CRITICAL",
+                environment="ALL",
+                scope="TOOL",
+                tool_pattern="report_equipment_issue",
+                argument_conditions={"severity": ["CRITICAL", "HIGH"]},
+                is_enabled=True
+            ),
+            SecurityPolicy(
+                id="POL-002",
+                name="Production Data Modification Gate",
+                description="State changes, updates, or stock transfers in Production environment require administrative authorization.",
+                action="REQUIRE_APPROVAL",
+                risk_level="HIGH",
+                environment="PRODUCTION",
+                scope="GLOBAL",
+                argument_conditions={},
+                is_enabled=True
+            ),
+            SecurityPolicy(
+                id="POL-003",
+                name="Telemetry & Status Read Access",
+                description="Unrestricted read-only operational telemetry across ERP, Equipment, and Inventory servers.",
+                action="ALLOW",
+                risk_level="LOW",
+                environment="ALL",
+                scope="TOOL",
+                tool_pattern="get_*",
+                argument_conditions={},
+                is_enabled=True
+            ),
+            SecurityPolicy(
+                id="POL-004",
+                name="Direct Equipment Shutdown Deny Rule",
+                description="Direct emergency fleet shutdown through unauthenticated agent pipelines is strictly prohibited.",
+                action="DENY",
+                risk_level="CRITICAL",
+                environment="ALL",
+                scope="TOOL",
+                tool_pattern="*shutdown*",
+                argument_conditions={},
+                is_enabled=True
+            )
+        ]
+        db.add_all(defaults)
+        db.commit()
+        policies = db.query(SecurityPolicy).order_by(SecurityPolicy.created_at.desc()).all()
+    return policies
+
+@router.post("/policies", response_model=SecurityPolicyOut)
+def create_security_policy(
+    req: SecurityPolicyCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission(PermissionEnum.GOVERNANCE_POLICIES))
+):
+    pol = SecurityPolicy(
+        name=req.name,
+        description=req.description,
+        action=req.action,
+        risk_level=req.risk_level,
+        environment=req.environment,
+        scope=req.scope,
+        server_id=req.server_id,
+        tool_pattern=req.tool_pattern,
+        argument_conditions=req.argument_conditions,
+        is_enabled=req.is_enabled
+    )
+    db.add(pol)
+    db.commit()
+    db.refresh(pol)
+
+    AuditService.record(
+        db, "POLICY_CHANGE", "POLICY", pol.id,
+        user_name=current_user.full_name, role=current_user.role,
+        details=f"Created security policy '{pol.name}' with action '{pol.action}' (Risk: {pol.risk_level})"
+    )
+    return pol
+
+@router.put("/policies/{policy_id}", response_model=SecurityPolicyOut)
+def update_security_policy(
+    policy_id: str,
+    req: SecurityPolicyUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission(PermissionEnum.GOVERNANCE_POLICIES))
+):
+    pol = db.query(SecurityPolicy).filter(SecurityPolicy.id == policy_id).first()
+    if not pol:
+        raise HTTPException(status_code=404, detail="Security Policy not found.")
+
+    update_data = req.dict(exclude_unset=True)
+    for field, val in update_data.items():
+        setattr(pol, field, val)
+
+    pol.updated_at = datetime.datetime.utcnow()
+    db.commit()
+    db.refresh(pol)
+
+    AuditService.record(
+        db, "POLICY_CHANGE", "POLICY", pol.id,
+        user_name=current_user.full_name, role=current_user.role,
+        details=f"Updated security policy '{pol.name}' (Action: {pol.action}, Enabled: {pol.is_enabled})"
+    )
+    return pol
+
+@router.delete("/policies/{policy_id}")
+def delete_security_policy(
+    policy_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission(PermissionEnum.GOVERNANCE_POLICIES))
+):
+    pol = db.query(SecurityPolicy).filter(SecurityPolicy.id == policy_id).first()
+    if not pol:
+        raise HTTPException(status_code=404, detail="Security Policy not found.")
+
+    pol_name = pol.name
+    db.delete(pol)
+    db.commit()
+
+    AuditService.record(
+        db, "POLICY_CHANGE", "POLICY", policy_id,
+        user_name=current_user.full_name, role=current_user.role,
+        details=f"Deleted security policy '{pol_name}'"
+    )
+    return {"success": True, "message": f"Policy '{pol_name}' deleted successfully."}

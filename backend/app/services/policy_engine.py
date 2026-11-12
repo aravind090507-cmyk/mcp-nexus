@@ -1,7 +1,9 @@
-from typing import Tuple, Optional, Dict, Any
+import fnmatch
+from typing import Tuple, Optional, Dict, Any, List
 from sqlalchemy.orm import Session
-from app.models.all_models import MCPServer, MCPTool, AIAgent, AgentToolPermission, User, SecurityEvent
+from app.models.all_models import MCPServer, MCPTool, AIAgent, AgentToolPermission, User, SecurityEvent, SecurityPolicy
 from app.core.permissions import RoleEnum, has_permission, PermissionEnum
+from app.core.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -13,21 +15,23 @@ class PolicyDecision:
 
 class PolicyEngine:
     """
-    Enterprise Security & Governance Policy Engine
-    Enforces RBAC, tool permissions, risk classification, and sensitive operation gating.
+    Enterprise Security & Governance Policy Intelligence Engine
+    Enforces RBAC, dynamic database policies, tool risk classification, 
+    environment overrides (Production vs Staging), argument-level checks, 
+    and dual-person approval triggers.
     """
     
     @staticmethod
     def classify_risk(tool_name: str, arguments: Dict[str, Any]) -> Tuple[str, bool]:
         """
-        Determines risk level (LOW, MEDIUM, HIGH, CRITICAL) and approval requirement.
+        Determines default risk level (LOW, MEDIUM, HIGH, CRITICAL) and approval requirement.
         Destructive operations or critical equipment changes require administrative approval.
         """
         name_lower = tool_name.lower()
         
-        # High-risk / Destructive keywords
+        # High-risk / Destructive operations
         if "report_equipment_issue" in name_lower:
-            sev = arguments.get("severity", "").upper()
+            sev = str(arguments.get("severity", "")).upper()
             if sev in ("CRITICAL", "HIGH"):
                 return "CRITICAL", True
             return "MEDIUM", False
@@ -35,13 +39,33 @@ class PolicyEngine:
         if any(term in name_lower for term in ["delete", "drop", "terminate", "reboot", "halt", "shutdown"]):
             return "CRITICAL", True
         
-        if any(term in name_lower for term in ["update", "modify", "allocate", "order", "dispatch"]):
+        if any(term in name_lower for term in ["update", "modify", "allocate", "order", "dispatch", "transfer"]):
             return "HIGH", True
         
         if any(term in name_lower for term in ["status", "details", "summary", "schedule", "inventory", "availability"]):
             return "LOW", False
         
         return "MEDIUM", False
+
+    @staticmethod
+    def _evaluate_argument_conditions(conditions: Dict[str, Any], arguments: Dict[str, Any]) -> bool:
+        """
+        Validates argument-level policy conditions (e.g., severity in ['CRITICAL', 'HIGH']).
+        Returns True if all conditions match.
+        """
+        if not conditions:
+            return True
+        for key, expected_val in conditions.items():
+            actual_val = arguments.get(key)
+            if actual_val is None:
+                return False
+            if isinstance(expected_val, list):
+                if str(actual_val).upper() not in [str(v).upper() for v in expected_val]:
+                    return False
+            else:
+                if str(actual_val).upper() != str(expected_val).upper():
+                    return False
+        return True
 
     @staticmethod
     def validate_execution(
@@ -94,7 +118,68 @@ class PolicyEngine:
                 )
                 return PolicyDecision.BLOCKED, f"Tool '{tool.name}' is explicitly forbidden for agent '{agent.name}'.", "HIGH"
 
-        # 5. Risk classification & approval check
+        # 5. Dynamic Database Policy Evaluation (Server-level, Tool-level, Argument-level, Environment rules)
+        current_env = (settings.ENVIRONMENT or "DEVELOPMENT").upper()
+        active_policies = db.query(SecurityPolicy).filter(
+            SecurityPolicy.is_enabled == True,
+            SecurityPolicy.environment.in_(["ALL", current_env])
+        ).all()
+
+        # Collect and rank all matching policies
+        # Specificity ranking: Exact tool match (100) > Pattern match (50) > Server scope (30) > Global (10)
+        # Action weight: DENY (3) > REQUIRE_APPROVAL (2) > ALLOW (1)
+        matched_policies = []
+        for policy in active_policies:
+            matched = False
+            specificity = 0
+            if policy.scope == "TOOL":
+                pattern = (policy.tool_pattern or "*").lower()
+                if tool.name.lower() == pattern:
+                    matched = True
+                    specificity = 100
+                elif fnmatch.fnmatch(tool.name.lower(), pattern):
+                    matched = True
+                    specificity = 50
+            elif policy.scope == "SERVER":
+                if policy.server_id == server.id or policy.server_id == server.identifier:
+                    matched = True
+                    specificity = 30
+            elif policy.scope == "GLOBAL":
+                matched = True
+                specificity = 10
+
+            if matched:
+                if policy.argument_conditions and not PolicyEngine._evaluate_argument_conditions(policy.argument_conditions, arguments):
+                    continue
+                action_weight = 3 if policy.action == "DENY" else (2 if policy.action == "REQUIRE_APPROVAL" else 1)
+                matched_policies.append((specificity, action_weight, policy))
+
+        if matched_policies:
+            # Sort by specificity desc, then action_weight desc
+            matched_policies.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            _, _, top_policy = matched_policies[0]
+
+            p_action = top_policy.action.upper()
+            p_risk = top_policy.risk_level.upper() if top_policy.risk_level != "ANY" else "HIGH"
+
+            if p_action == "DENY":
+                PolicyEngine._log_security_event(
+                    db, "POLICY_VIOLATION", "HIGH", user.email, tool.name,
+                    f"Execution rejected by Security Policy '{top_policy.name}' (Action: DENY, Env: {current_env})"
+                )
+                return PolicyDecision.BLOCKED, f"Execution denied by Policy '{top_policy.name}'.", p_risk
+
+            elif p_action == "REQUIRE_APPROVAL":
+                PolicyEngine._log_security_event(
+                    db, "APPROVAL_REQUESTED", "HIGH", user.email, tool.name,
+                    f"Sensitive execution gated by Policy '{top_policy.name}' (Requires Dual-Control Approval)"
+                )
+                return PolicyDecision.NEEDS_APPROVAL, f"Policy '{top_policy.name}' mandates administrative approval for tool '{tool.name}'.", p_risk
+
+            elif p_action == "ALLOW":
+                return PolicyDecision.PERMITTED, f"Execution explicitly permitted by Policy '{top_policy.name}'.", p_risk
+
+        # 6. Default Fallback Risk Classification & Approval check
         risk_level, requires_approval = PolicyEngine.classify_risk(tool.name, arguments)
         if tool.requires_approval or requires_approval:
             PolicyEngine._log_security_event(

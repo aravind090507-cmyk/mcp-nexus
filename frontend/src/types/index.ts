@@ -129,6 +129,22 @@ export interface AuditLog {
   timestamp: string;
 }
 
+export interface SecurityPolicy {
+  id: string;
+  name: string;
+  description?: string;
+  action: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
+  risk_level: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | 'ANY';
+  environment: 'ALL' | 'PRODUCTION' | 'STAGING' | 'DEVELOPMENT';
+  scope: 'GLOBAL' | 'SERVER' | 'TOOL';
+  server_id?: string;
+  tool_pattern?: string;
+  argument_conditions?: Record<string, any>;
+  is_enabled: boolean;
+  created_at: string;
+  updated_at?: string;
+}
+
 export interface IntegrationConfig {
   id: string;
   name: string;

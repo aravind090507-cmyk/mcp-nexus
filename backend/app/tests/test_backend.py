@@ -321,6 +321,12 @@ def test_agent_cross_server_orchestration(client, admin_headers):
     res = client.post("/api/v1/agents/orchestrate", json=orch_payload, headers=admin_headers)
     assert res.status_code == 200
     data = res.json()
+    if data["overall_status"] != "SUCCESS":
+        print("\n\nFAILURE DEBUG:")
+        print("synthesis:", data.get("synthesis"))
+        for s in data.get("spans", []):
+            if s.get("status") in ("BLOCKED", "FAILED"):
+                print("FAILED SPAN:", s)
     assert data["overall_status"] == "SUCCESS"
     assert len(data["tool_executions"]) >= 3
     assert len(data["spans"]) >= 5
@@ -424,10 +430,11 @@ def test_agent_dynamic_planning_and_concurrency(client, admin_headers):
 
 def test_agent_max_execution_steps_guard(client, admin_headers):
     """Verify that execution limit guard halts orchestration when planned steps exceed agent limit."""
+    import uuid
     # Create an agent with max_execution_steps = 1
     create_payload = {
         "name": "Restricted Constrained Agent",
-        "identifier": "constrained-agent-01",
+        "identifier": f"constrained-agent-{uuid.uuid4().hex[:6]}",
         "description": "Agent strictly constrained to 1 step",
         "model": "claude-3-5-sonnet",
         "system_prompt": "You are a restricted agent.",
@@ -449,5 +456,89 @@ def test_agent_max_execution_steps_guard(client, admin_headers):
     assert data["overall_status"] == "BLOCKED"
     assert "exceed agent max execution limit" in data["synthesis"].lower() or "halted" in data["synthesis"].lower()
     assert len(data["tool_executions"]) == 0
+
+def test_policy_crud_operations(client, admin_headers):
+    """Verify database-backed Policy Intelligence Engine CRUD endpoints."""
+    # 1. Fetch policies (seeds defaults)
+    res = client.get("/api/v1/governance/policies", headers=admin_headers)
+    assert res.status_code == 200
+    policies = res.json()
+    assert len(policies) >= 4
+    names = [p["name"] for p in policies]
+    assert any("Destructive Operation" in n for n in names)
+
+    # 2. Create custom policy rule
+    create_payload = {
+        "name": "Staging Fleet Shutdown Prohibition",
+        "description": "Prohibit direct fleet shutdown commands across staging environments.",
+        "action": "DENY",
+        "risk_level": "CRITICAL",
+        "environment": "ALL",
+        "scope": "TOOL",
+        "tool_pattern": "*shutdown*",
+        "is_enabled": True
+    }
+    c_res = client.post("/api/v1/governance/policies", json=create_payload, headers=admin_headers)
+    assert c_res.status_code == 200
+    created = c_res.json()
+    pol_id = created["id"]
+    assert created["action"] == "DENY"
+
+    # 3. Update policy rule
+    u_res = client.put(
+        f"/api/v1/governance/policies/{pol_id}",
+        json={"is_enabled": False, "description": "Temporarily disabled by test"},
+        headers=admin_headers
+    )
+    assert u_res.status_code == 200
+    assert u_res.json()["is_enabled"] is False
+
+    # 4. Delete policy rule
+    d_res = client.delete(f"/api/v1/governance/policies/{pol_id}", headers=admin_headers)
+    assert d_res.status_code == 200
+    assert d_res.json()["success"] is True
+
+def test_policy_engine_dynamic_evaluation_rule(client, admin_headers):
+    """Verify that a dynamic DENY policy blocks tool execution immediately."""
+    # Ensure any residual freeze policy is deleted
+    policies_res = client.get("/api/v1/governance/policies", headers=admin_headers)
+    for p in policies_res.json():
+        if "Dynamic ERP Freeze Rule" in p["name"]:
+            client.delete(f"/api/v1/governance/policies/{p['id']}", headers=admin_headers)
+
+    create_payload = {
+        "name": "Dynamic ERP Freeze Rule",
+        "description": "Temporarily freeze project status inquiries",
+        "action": "DENY",
+        "risk_level": "HIGH",
+        "environment": "ALL",
+        "scope": "TOOL",
+        "tool_pattern": "get_project_status",
+        "is_enabled": True
+    }
+    freeze_pol_id = None
+    exec_payload = {
+        "tool_name": "get_project_status",
+        "arguments": {}
+    }
+    try:
+        c_res = client.post("/api/v1/governance/policies", json=create_payload, headers=admin_headers)
+        assert c_res.status_code == 200
+        freeze_pol_id = c_res.json()["id"]
+
+        # Attempt execution of get_project_status -> must be blocked
+        e_res = client.post("/api/v1/tools/execute", json=exec_payload, headers=admin_headers)
+        assert e_res.status_code == 200
+        assert e_res.json()["is_success"] is False
+        assert "denied by policy" in e_res.json()["error"].lower()
+    finally:
+        if freeze_pol_id:
+            client.delete(f"/api/v1/governance/policies/{freeze_pol_id}", headers=admin_headers)
+
+    # Execution succeeds again after unfreezing
+    e2_res = client.post("/api/v1/tools/execute", json=exec_payload, headers=admin_headers)
+    assert e2_res.status_code == 200
+    assert e2_res.json()["is_success"] is True
+
 
 
