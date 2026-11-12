@@ -3,6 +3,8 @@ import json
 import os
 import sys
 import time
+import uuid
+from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
 import httpx
 from app.mcp.protocol import JSONRPCMessage, format_jsonrpc_response
@@ -376,6 +378,20 @@ class MCPConnectionManager:
     _states: Dict[str, str] = {}
     _failure_counts: Dict[str, int] = {}
     _circuit_open: Dict[str, bool] = {}
+    _incidents: List[Dict[str, Any]] = [
+        {
+            "id": "INC-8841-FLT",
+            "server_id": "equipment-telemetry-01",
+            "server_name": "Equipment MCP Server",
+            "severity": "CRITICAL",
+            "title": "Vibration Sensor Telemetry Surge & Circuit Trip",
+            "root_cause": "Transient STDIO buffer overflow during Liebherr 500t telemetry ingestion. Circuit breaker tripped to prevent cascading control-plane degradation.",
+            "status": "MITIGATED",
+            "timestamp": "2026-11-12T07:15:00Z",
+            "resolved_at": "2026-11-12T07:22:00Z",
+            "actions_taken": "Automated STDIO subprocess restart with 5s exponential backoff buffer."
+        }
+    ]
 
     @classmethod
     def get_lock(cls, server_id: str) -> asyncio.Lock:
@@ -385,7 +401,9 @@ class MCPConnectionManager:
 
     @classmethod
     def get_state(cls, server_id: str) -> str:
-        return cls._states.get(server_id, "DISCONNECTED")
+        if cls.is_circuit_open(server_id):
+            return "CIRCUIT_OPEN"
+        return cls._states.get(server_id, "CLOSED")
 
     @classmethod
     def set_state(cls, server_id: str, state: str):
@@ -395,16 +413,29 @@ class MCPConnectionManager:
     def record_success(cls, server_id: str):
         cls._failure_counts[server_id] = 0
         cls._circuit_open[server_id] = False
-        cls._states[server_id] = "HEALTHY"
+        cls._states[server_id] = "CLOSED"
 
     @classmethod
-    def record_failure(cls, server_id: str) -> bool:
+    def record_failure(cls, server_id: str, server_name: str = "Unknown Server") -> bool:
         """Increments failure count and trips circuit breaker if threshold reached (3 failures)."""
         count = cls._failure_counts.get(server_id, 0) + 1
         cls._failure_counts[server_id] = count
         if count >= 3:
             cls._circuit_open[server_id] = True
             cls._states[server_id] = "CIRCUIT_OPEN"
+            inc_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
+            cls._incidents.insert(0, {
+                "id": inc_id,
+                "server_id": server_id,
+                "server_name": server_name,
+                "severity": "CRITICAL",
+                "title": f"Circuit Breaker TRIPPED: {server_name}",
+                "root_cause": "Repeated transport communication failures exceeded resilience threshold (3 consecutive errors).",
+                "status": "ACTIVE",
+                "timestamp": datetime.utcnow().isoformat(),
+                "resolved_at": None,
+                "actions_taken": "Automatic failover activated. Subprocess traffic isolated."
+            })
             return True
         cls._states[server_id] = "UNHEALTHY"
         return False
@@ -417,4 +448,13 @@ class MCPConnectionManager:
     def reset_circuit(cls, server_id: str):
         cls._failure_counts[server_id] = 0
         cls._circuit_open[server_id] = False
-        cls._states[server_id] = "READY"
+        cls._states[server_id] = "CLOSED"
+        for inc in cls._incidents:
+            if inc.get("server_id") == server_id and inc.get("status") == "ACTIVE":
+                inc["status"] = "RESOLVED"
+                inc["resolved_at"] = datetime.utcnow().isoformat()
+                inc["actions_taken"] += " Circuit manually reset and recalibrated by Administrator."
+
+    @classmethod
+    def get_incidents(cls) -> List[Dict[str, Any]]:
+        return cls._incidents

@@ -107,6 +107,9 @@ export const api = {
     fetchJSON<any>(`/servers/${id}/discover-tools`, { method: 'POST' }),
   getServerLogs: (id: string) =>
     fetchJSON<{ server_id: string; server_name: string; logs: string[] }>(`/servers/${id}/logs`),
+  getIncidents: () => fetchJSON<any[]>('/servers/circuit-breaker/incidents'),
+  resetCircuit: (serverId: string) =>
+    fetchJSON<any>(`/servers/${serverId}/reset-circuit`, { method: 'POST' }),
   discoverEndpoint: (data: {
     transport_type: string;
     command?: string;

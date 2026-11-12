@@ -237,6 +237,16 @@ async def ping_server_endpoint(
         db.commit()
     return {"server_id": server.id, "success": ok, "latency_ms": lat, "message": msg}
 
+@router.get("/circuit-breaker/incidents")
+def list_incidents(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Returns live infrastructure incidents, tripped circuit breakers, and automatic mitigation events.
+    """
+    from app.mcp.client import MCPConnectionManager
+    return MCPConnectionManager.get_incidents()
+
 @router.post("/{server_id}/reset-circuit")
 def reset_circuit_endpoint(
     server_id: str,

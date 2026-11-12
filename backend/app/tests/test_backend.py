@@ -377,22 +377,36 @@ def test_mcp_resources_and_prompts_discovery(client, admin_headers):
     assert prompts[0]["name"] == "audit_project_milestones"
 
 def test_circuit_breaker_resilience(client, admin_headers):
-    """Verify circuit breaker trips to OPEN on repeated failures and can be reset."""
+    """Verify circuit breaker trips to OPEN on repeated failures, records incident, and can be reset."""
     from app.mcp.client import MCPConnectionManager
     srv_id = "test-fault-srv-99"
     MCPConnectionManager.reset_circuit(srv_id)
     assert MCPConnectionManager.is_circuit_open(srv_id) is False
 
     # Simulate 3 failures
-    MCPConnectionManager.record_failure(srv_id)
-    MCPConnectionManager.record_failure(srv_id)
-    tripped = MCPConnectionManager.record_failure(srv_id)
+    MCPConnectionManager.record_failure(srv_id, "Test Fault Server")
+    MCPConnectionManager.record_failure(srv_id, "Test Fault Server")
+    tripped = MCPConnectionManager.record_failure(srv_id, "Test Fault Server")
     assert tripped is True
     assert MCPConnectionManager.is_circuit_open(srv_id) is True
+
+    # Check incident recorded via API
+    inc_res = client.get("/api/v1/servers/circuit-breaker/incidents", headers=admin_headers)
+    assert inc_res.status_code == 200
+    incidents = inc_res.json()
+    assert len(incidents) >= 1
+    target_inc = [i for i in incidents if i.get("server_id") == srv_id][0]
+    assert target_inc["status"] == "ACTIVE"
 
     # Reset circuit
     MCPConnectionManager.reset_circuit(srv_id)
     assert MCPConnectionManager.is_circuit_open(srv_id) is False
+
+    # Check incident resolved via API
+    inc_res2 = client.get("/api/v1/servers/circuit-breaker/incidents", headers=admin_headers)
+    assert inc_res2.status_code == 200
+    target_inc2 = [i for i in inc_res2.json() if i.get("server_id") == srv_id][0]
+    assert target_inc2["status"] == "RESOLVED"
 
 def test_agent_dynamic_planning_and_concurrency(client, admin_headers):
     """Verify dynamic tool selection, parameter extraction, concurrent execution across 3 servers."""

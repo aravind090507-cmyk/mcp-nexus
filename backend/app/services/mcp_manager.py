@@ -151,7 +151,7 @@ class MCPManager:
             except Exception as e:
                 tool.failed_executions += 1
                 server.error_rate = round(min(1.0, server.error_rate + 0.05), 3)
-                tripped = MCPConnectionManager.record_failure(server.id)
+                tripped = MCPConnectionManager.record_failure(server.id, server.name)
                 db.commit()
                 msg = f"Tool execution error: {str(e)}"
                 if tripped:
