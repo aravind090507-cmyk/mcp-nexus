@@ -8,6 +8,7 @@ import { ServerManagement } from './features/servers/ServerManagement';
 import { ToolRegistry } from './features/tools/ToolRegistry';
 import { AgentOrchestration } from './features/agents/AgentOrchestration';
 import { IntegrationsView } from './features/integrations/IntegrationsView';
+import { EnterpriseWorkflows } from './features/workflows/EnterpriseWorkflows';
 import { AccessControl } from './features/governance/AccessControl';
 import { SecurityPolicies } from './features/governance/SecurityPolicies';
 import { ApprovalQueue } from './features/governance/ApprovalQueue';
@@ -43,6 +44,7 @@ export function App() {
             <Route path="servers" element={<ServerManagement />} />
             <Route path="tools" element={<ToolRegistry />} />
             <Route path="agents" element={<AgentOrchestration />} />
+            <Route path="workflows" element={<EnterpriseWorkflows />} />
             <Route path="integrations" element={<IntegrationsView />} />
 
             {/* GOVERNANCE */}

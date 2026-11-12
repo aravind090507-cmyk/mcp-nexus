@@ -17,7 +17,8 @@ import {
   Building2,
   Key,
   Users,
-  ChevronRight
+  ChevronRight,
+  GitMerge
 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../services/api';
@@ -57,6 +58,7 @@ export const Sidebar: React.FC = () => {
         { name: 'MCP Servers', path: '/servers', icon: Server, badge: metrics?.top_metrics?.registered_servers },
         { name: 'Tool Registry', path: '/tools', icon: Wrench },
         { name: 'AI Agents', path: '/agents', icon: Bot, badge: metrics?.top_metrics?.connected_agents },
+        { name: 'Enterprise Workflows', path: '/workflows', icon: GitMerge },
         { name: 'Integrations', path: '/integrations', icon: Layers },
       ],
     },
