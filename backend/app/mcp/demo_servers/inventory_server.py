@@ -212,7 +212,11 @@ def run_server():
                     "id": req_id,
                     "result": {
                         "protocolVersion": "2024-11-05",
-                        "capabilities": {"tools": {}},
+                        "capabilities": {
+                            "tools": {},
+                            "resources": {},
+                            "prompts": {}
+                        },
                         "serverInfo": {
                             "name": "Inventory MCP Server",
                             "version": "1.0.0"
@@ -230,6 +234,39 @@ def run_server():
 
             elif method == "tools/list":
                 res = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+                print(json.dumps(res), flush=True)
+
+            elif method == "resources/list":
+                res = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "resources": [
+                            {
+                                "uri": "inventory://safety-stock/matrix",
+                                "name": "Central Warehouse Safety Stock Matrix",
+                                "description": "Minimum threshold multipliers by material category.",
+                                "mimeType": "application/json"
+                            }
+                        ]
+                    }
+                }
+                print(json.dumps(res), flush=True)
+
+            elif method == "prompts/list":
+                res = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "prompts": [
+                            {
+                                "name": "check_low_stock_materials",
+                                "description": "Identify all construction supplies below safety thresholds.",
+                                "arguments": []
+                            }
+                        ]
+                    }
+                }
                 print(json.dumps(res), flush=True)
 
             elif method == "tools/call":

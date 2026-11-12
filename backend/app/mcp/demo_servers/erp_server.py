@@ -190,7 +190,11 @@ def run_server():
                     "id": req_id,
                     "result": {
                         "protocolVersion": "2024-11-05",
-                        "capabilities": {"tools": {}},
+                        "capabilities": {
+                            "tools": {},
+                            "resources": {},
+                            "prompts": {}
+                        },
                         "serverInfo": {
                             "name": "ERP MCP Server",
                             "version": "1.0.0"
@@ -213,6 +217,47 @@ def run_server():
                     "id": req_id,
                     "result": {
                         "tools": TOOLS
+                    }
+                }
+                print(json.dumps(res), flush=True)
+
+            elif method == "resources/list":
+                res = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "resources": [
+                            {
+                                "uri": "erp://projects/specs",
+                                "name": "L&T Heavy Civil Strategic Projects Specifications",
+                                "description": "Master scope documents, contract terms, and milestone delivery dates.",
+                                "mimeType": "application/json"
+                            },
+                            {
+                                "uri": "erp://financials/budget-q3",
+                                "name": "Q3 Infrastructure Project CAPEX Budgets",
+                                "description": "Capital expenditure allocations and actual burn rates.",
+                                "mimeType": "application/json"
+                            }
+                        ]
+                    }
+                }
+                print(json.dumps(res), flush=True)
+
+            elif method == "prompts/list":
+                res = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "prompts": [
+                            {
+                                "name": "audit_project_milestones",
+                                "description": "Perform financial and milestone audit for a specific infrastructure package.",
+                                "arguments": [
+                                    {"name": "project_id", "description": "The project code (e.g. PRJ-MUM-001)", "required": True}
+                                ]
+                            }
+                        ]
                     }
                 }
                 print(json.dumps(res), flush=True)

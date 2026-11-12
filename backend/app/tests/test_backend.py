@@ -336,3 +336,55 @@ def test_infrastructure_topology(client, admin_headers):
     assert "gatewayNode" in node_types
     assert "serverNode" in node_types
     assert "agentNode" in node_types
+
+def test_mcp_protocol_capabilities_and_ping(client, admin_headers):
+    """Verify MCP protocol ping and latency measurement on connected server."""
+    servers_res = client.get("/api/v1/servers", headers=admin_headers)
+    assert servers_res.status_code == 200
+    erp_server = [s for s in servers_res.json() if s["name"] == "ERP MCP Server"][0]
+
+    ping_res = client.post(f"/api/v1/servers/{erp_server['id']}/ping", headers=admin_headers)
+    assert ping_res.status_code == 200
+    ping_data = ping_res.json()
+    assert ping_data["success"] is True
+    assert ping_data["latency_ms"] >= 0.0
+    assert "Pong" in ping_data["message"]
+
+def test_mcp_resources_and_prompts_discovery(client, admin_headers):
+    """Verify standard MCP resource and prompt discovery (specification 2024-11-05)."""
+    servers_res = client.get("/api/v1/servers", headers=admin_headers)
+    assert servers_res.status_code == 200
+    erp_server = [s for s in servers_res.json() if s["name"] == "ERP MCP Server"][0]
+
+    # Discover resources
+    res_out = client.get(f"/api/v1/servers/{erp_server['id']}/resources", headers=admin_headers)
+    assert res_out.status_code == 200
+    resources = res_out.json()["resources"]
+    assert len(resources) >= 1
+    assert any("erp://" in r["uri"] for r in resources)
+
+    # Discover prompts
+    prompt_out = client.get(f"/api/v1/servers/{erp_server['id']}/prompts", headers=admin_headers)
+    assert prompt_out.status_code == 200
+    prompts = prompt_out.json()["prompts"]
+    assert len(prompts) >= 1
+    assert prompts[0]["name"] == "audit_project_milestones"
+
+def test_circuit_breaker_resilience(client, admin_headers):
+    """Verify circuit breaker trips to OPEN on repeated failures and can be reset."""
+    from app.mcp.client import MCPConnectionManager
+    srv_id = "test-fault-srv-99"
+    MCPConnectionManager.reset_circuit(srv_id)
+    assert MCPConnectionManager.is_circuit_open(srv_id) is False
+
+    # Simulate 3 failures
+    MCPConnectionManager.record_failure(srv_id)
+    MCPConnectionManager.record_failure(srv_id)
+    tripped = MCPConnectionManager.record_failure(srv_id)
+    assert tripped is True
+    assert MCPConnectionManager.is_circuit_open(srv_id) is True
+
+    # Reset circuit
+    MCPConnectionManager.reset_circuit(srv_id)
+    assert MCPConnectionManager.is_circuit_open(srv_id) is False
+

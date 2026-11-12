@@ -287,3 +287,134 @@ class MCPClient:
                 return data.get("result", {}), round(duration_ms, 2)
 
         raise MCPClientError("Unsupported transport")
+
+    async def ping(self) -> float:
+        """Sends protocol ping request and returns latency in milliseconds."""
+        start = time.perf_counter()
+        req_ping = {"jsonrpc": "2.0", "id": self._next_id(), "method": "ping"}
+        if self.transport_type == "STDIO":
+            resps = await self._execute_stdio_exchange([req_ping])
+            if not resps:
+                raise MCPClientError("No response received for ping.")
+            return round((time.perf_counter() - start) * 1000.0, 2)
+        elif self.transport_type in ("HTTP_SSE", "HTTP"):
+            headers = {"Content-Type": "application/json"}
+            if self.auth_token:
+                headers["Authorization"] = f"Bearer {self.auth_token}"
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                res = await client.post(self.endpoint, json=req_ping, headers=headers)
+                return round((time.perf_counter() - start) * 1000.0, 2)
+        raise MCPClientError(f"Unsupported transport: {self.transport_type}")
+
+    async def list_resources(self) -> List[Dict[str, Any]]:
+        """Discovers resources available on this MCP server."""
+        req_init = {
+            "jsonrpc": "2.0", "id": self._next_id(), "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "MCP-Nexus", "version": "1.0.0"}}
+        }
+        req_notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        res_id = self._next_id()
+        req_res = {"jsonrpc": "2.0", "id": res_id, "method": "resources/list", "params": {}}
+
+        if self.transport_type == "STDIO":
+            resps = await self._execute_stdio_exchange([req_init, req_notif, req_res])
+            for r in resps:
+                if r.get("id") == res_id:
+                    if "error" in r:
+                        raise MCPClientError(f"resources/list failed: {r['error']}")
+                    return r.get("result", {}).get("resources", [])
+            return []
+        elif self.transport_type in ("HTTP_SSE", "HTTP"):
+            headers = {"Content-Type": "application/json"}
+            if self.auth_token:
+                headers["Authorization"] = f"Bearer {self.auth_token}"
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                res = await client.post(self.endpoint, json=req_res, headers=headers)
+                data = res.json()
+                if "error" in data:
+                    raise MCPClientError(f"resources/list error: {data['error']}")
+                return data.get("result", {}).get("resources", [])
+        return []
+
+    async def list_prompts(self) -> List[Dict[str, Any]]:
+        """Discovers prompts available on this MCP server."""
+        req_init = {
+            "jsonrpc": "2.0", "id": self._next_id(), "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "MCP-Nexus", "version": "1.0.0"}}
+        }
+        req_notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        prompt_id = self._next_id()
+        req_prompt = {"jsonrpc": "2.0", "id": prompt_id, "method": "prompts/list", "params": {}}
+
+        if self.transport_type == "STDIO":
+            resps = await self._execute_stdio_exchange([req_init, req_notif, req_prompt])
+            for r in resps:
+                if r.get("id") == prompt_id:
+                    if "error" in r:
+                        raise MCPClientError(f"prompts/list failed: {r['error']}")
+                    return r.get("result", {}).get("prompts", [])
+            return []
+        elif self.transport_type in ("HTTP_SSE", "HTTP"):
+            headers = {"Content-Type": "application/json"}
+            if self.auth_token:
+                headers["Authorization"] = f"Bearer {self.auth_token}"
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                res = await client.post(self.endpoint, json=req_prompt, headers=headers)
+                data = res.json()
+                if "error" in data:
+                    raise MCPClientError(f"prompts/list error: {data['error']}")
+                return data.get("result", {}).get("prompts", [])
+        return []
+
+class MCPConnectionManager:
+    """
+    Centralized MCP Connection Manager
+    Maintains connection states, concurrency locks, circuit breaker metrics,
+    and lifecycle management across all registered MCP servers.
+    """
+    _locks: Dict[str, asyncio.Lock] = {}
+    _states: Dict[str, str] = {}
+    _failure_counts: Dict[str, int] = {}
+    _circuit_open: Dict[str, bool] = {}
+
+    @classmethod
+    def get_lock(cls, server_id: str) -> asyncio.Lock:
+        if server_id not in cls._locks:
+            cls._locks[server_id] = asyncio.Lock()
+        return cls._locks[server_id]
+
+    @classmethod
+    def get_state(cls, server_id: str) -> str:
+        return cls._states.get(server_id, "DISCONNECTED")
+
+    @classmethod
+    def set_state(cls, server_id: str, state: str):
+        cls._states[server_id] = state
+
+    @classmethod
+    def record_success(cls, server_id: str):
+        cls._failure_counts[server_id] = 0
+        cls._circuit_open[server_id] = False
+        cls._states[server_id] = "HEALTHY"
+
+    @classmethod
+    def record_failure(cls, server_id: str) -> bool:
+        """Increments failure count and trips circuit breaker if threshold reached (3 failures)."""
+        count = cls._failure_counts.get(server_id, 0) + 1
+        cls._failure_counts[server_id] = count
+        if count >= 3:
+            cls._circuit_open[server_id] = True
+            cls._states[server_id] = "CIRCUIT_OPEN"
+            return True
+        cls._states[server_id] = "UNHEALTHY"
+        return False
+
+    @classmethod
+    def is_circuit_open(cls, server_id: str) -> bool:
+        return cls._circuit_open.get(server_id, False)
+
+    @classmethod
+    def reset_circuit(cls, server_id: str):
+        cls._failure_counts[server_id] = 0
+        cls._circuit_open[server_id] = False
+        cls._states[server_id] = "READY"

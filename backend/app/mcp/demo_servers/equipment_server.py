@@ -205,7 +205,11 @@ def run_server():
                     "id": req_id,
                     "result": {
                         "protocolVersion": "2024-11-05",
-                        "capabilities": {"tools": {}},
+                        "capabilities": {
+                            "tools": {},
+                            "resources": {},
+                            "prompts": {}
+                        },
                         "serverInfo": {
                             "name": "Equipment MCP Server",
                             "version": "1.0.0"
@@ -223,6 +227,39 @@ def run_server():
 
             elif method == "tools/list":
                 res = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+                print(json.dumps(res), flush=True)
+
+            elif method == "resources/list":
+                res = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "resources": [
+                            {
+                                "uri": "equipment://fleet/telemetry-alarms",
+                                "name": "Heavy Plant Real-Time Alarms Stream",
+                                "description": "Continuous telemetry feed for heavy machinery with vibration and oil temperature exceedances.",
+                                "mimeType": "application/json"
+                            }
+                        ]
+                    }
+                }
+                print(json.dumps(res), flush=True)
+
+            elif method == "prompts/list":
+                res = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "prompts": [
+                            {
+                                "name": "audit_equipment_overdue",
+                                "description": "Scan heavy equipment fleet for overdue preventative maintenance and vibration alarms.",
+                                "arguments": []
+                            }
+                        ]
+                    }
+                }
                 print(json.dumps(res), flush=True)
 
             elif method == "tools/call":

@@ -194,6 +194,62 @@ async def discover_tools(
         "tools": [MCPToolOut.from_orm(t) for t in tools]
     }
 
+@router.get("/{server_id}/resources")
+async def get_server_resources(
+    server_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    server = db.query(MCPServer).filter(MCPServer.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP Server not found.")
+    resources = await MCPManager.discover_resources(server)
+    return {"server_id": server.id, "server_name": server.name, "count": len(resources), "resources": resources}
+
+@router.get("/{server_id}/prompts")
+async def get_server_prompts(
+    server_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    server = db.query(MCPServer).filter(MCPServer.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP Server not found.")
+    prompts = await MCPManager.discover_prompts(server)
+    return {"server_id": server.id, "server_name": server.name, "count": len(prompts), "prompts": prompts}
+
+@router.post("/{server_id}/ping")
+async def ping_server_endpoint(
+    server_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    server = db.query(MCPServer).filter(MCPServer.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP Server not found.")
+    ok, lat, msg = await MCPManager.ping_server(server)
+    if ok:
+        server.avg_response_time_ms = lat
+        server.last_health_check = datetime.datetime.utcnow()
+        db.commit()
+    return {"server_id": server.id, "success": ok, "latency_ms": lat, "message": msg}
+
+@router.post("/{server_id}/reset-circuit")
+def reset_circuit_endpoint(
+    server_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission(PermissionEnum.SERVERS_WRITE))
+):
+    server = db.query(MCPServer).filter(MCPServer.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP Server not found.")
+    from app.mcp.client import MCPConnectionManager
+    MCPConnectionManager.reset_circuit(server.id)
+    server.status = "HEALTHY"
+    server.error_rate = 0.0
+    db.commit()
+    return {"message": f"Circuit breaker for '{server.name}' reset successfully.", "status": "HEALTHY"}
+
 @router.get("/{server_id}/logs")
 def get_server_logs(
     server_id: str,

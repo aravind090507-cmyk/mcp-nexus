@@ -2,7 +2,7 @@ import datetime
 from typing import List, Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
 from app.models.all_models import MCPServer, MCPTool, User
-from app.mcp.client import MCPClient, MCPClientError
+from app.mcp.client import MCPClient, MCPClientError, MCPConnectionManager
 from app.services.audit_service import AuditService
 from app.services.policy_engine import PolicyEngine
 import logging
@@ -25,23 +25,69 @@ class MCPManager:
     @staticmethod
     async def test_server_connection(server: MCPServer) -> Tuple[bool, str, float, Dict[str, Any]]:
         client = MCPManager.get_client_for_server(server)
-        try:
-            res, latency_ms = await client.initialize()
-            return True, "Connected successfully via Model Context Protocol.", latency_ms, res
-        except Exception as e:
-            logger.error(f"Failed connection to MCP Server '{server.name}': {e}")
-            return False, str(e), 0.0, {}
+        lock = MCPConnectionManager.get_lock(server.id)
+        async with lock:
+            try:
+                res, latency_ms = await client.initialize()
+                MCPConnectionManager.record_success(server.id)
+                return True, "Connected successfully via Model Context Protocol.", latency_ms, res
+            except Exception as e:
+                logger.error(f"Failed connection to MCP Server '{server.name}': {e}")
+                MCPConnectionManager.record_failure(server.id)
+                return False, str(e), 0.0, {}
+
+    @staticmethod
+    async def ping_server(server: MCPServer) -> Tuple[bool, float, str]:
+        """Sends a protocol ping returning (success, latency_ms, message)."""
+        client = MCPManager.get_client_for_server(server)
+        lock = MCPConnectionManager.get_lock(server.id)
+        async with lock:
+            try:
+                latency_ms = await client.ping()
+                MCPConnectionManager.record_success(server.id)
+                return True, latency_ms, "Pong received from MCP server."
+            except Exception as e:
+                MCPConnectionManager.record_failure(server.id)
+                return False, 0.0, str(e)
+
+    @staticmethod
+    async def discover_resources(server: MCPServer) -> List[Dict[str, Any]]:
+        """Discovers MCP resources published by this server."""
+        client = MCPManager.get_client_for_server(server)
+        lock = MCPConnectionManager.get_lock(server.id)
+        async with lock:
+            try:
+                return await client.list_resources()
+            except Exception as e:
+                logger.warning(f"Resource discovery error on {server.name}: {e}")
+                return []
+
+    @staticmethod
+    async def discover_prompts(server: MCPServer) -> List[Dict[str, Any]]:
+        """Discovers MCP prompts published by this server."""
+        client = MCPManager.get_client_for_server(server)
+        lock = MCPConnectionManager.get_lock(server.id)
+        async with lock:
+            try:
+                return await client.list_prompts()
+            except Exception as e:
+                logger.warning(f"Prompt discovery error on {server.name}: {e}")
+                return []
 
     @staticmethod
     async def discover_tools(db: Session, server: MCPServer) -> List[MCPTool]:
         client = MCPManager.get_client_for_server(server)
-        try:
-            tools_data = await client.list_tools()
-        except Exception as e:
-            logger.error(f"Error discovering tools for {server.name}: {e}")
-            server.status = "DEGRADED"
-            db.commit()
-            raise MCPClientError(f"Failed to list tools: {str(e)}")
+        lock = MCPConnectionManager.get_lock(server.id)
+        async with lock:
+            try:
+                tools_data = await client.list_tools()
+                MCPConnectionManager.record_success(server.id)
+            except Exception as e:
+                logger.error(f"Error discovering tools for {server.name}: {e}")
+                server.status = "DEGRADED"
+                db.commit()
+                MCPConnectionManager.record_failure(server.id)
+                raise MCPClientError(f"Failed to list tools: {str(e)}")
 
         existing_tools = {t.name: t for t in db.query(MCPTool).filter(MCPTool.server_id == server.id).all()}
         discovered_tools = []
@@ -83,20 +129,31 @@ class MCPManager:
         tool: MCPTool,
         arguments: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], float, bool, Optional[str]]:
-        client = MCPManager.get_client_for_server(server)
-        try:
-            res, duration_ms = await client.call_tool(tool.name, arguments)
-            
-            # Update metrics
-            tool.total_executions += 1
-            tool.last_executed_at = datetime.datetime.utcnow()
-            server.total_calls += 1
-            server.avg_response_time_ms = round((server.avg_response_time_ms * 0.8) + (duration_ms * 0.2), 2)
-            db.commit()
+        # Circuit breaker check
+        if MCPConnectionManager.is_circuit_open(server.id):
+            return {}, 0.0, False, f"Circuit breaker OPEN for server '{server.name}' due to repeated failures. Automatic failover active."
 
-            return res, duration_ms, True, None
-        except Exception as e:
-            tool.failed_executions += 1
-            server.error_rate = round(min(1.0, server.error_rate + 0.05), 3)
-            db.commit()
-            return {}, 0.0, False, str(e)
+        client = MCPManager.get_client_for_server(server)
+        lock = MCPConnectionManager.get_lock(server.id)
+        async with lock:
+            try:
+                res, duration_ms = await client.call_tool(tool.name, arguments)
+                MCPConnectionManager.record_success(server.id)
+                
+                # Update metrics
+                tool.total_executions += 1
+                tool.last_executed_at = datetime.datetime.utcnow()
+                server.total_calls += 1
+                server.avg_response_time_ms = round((server.avg_response_time_ms * 0.8) + (duration_ms * 0.2), 2)
+                db.commit()
+
+                return res, duration_ms, True, None
+            except Exception as e:
+                tool.failed_executions += 1
+                server.error_rate = round(min(1.0, server.error_rate + 0.05), 3)
+                tripped = MCPConnectionManager.record_failure(server.id)
+                db.commit()
+                msg = f"Tool execution error: {str(e)}"
+                if tripped:
+                    msg += " [Circuit breaker TRIPPED to OPEN state]."
+                return {}, 0.0, False, msg
