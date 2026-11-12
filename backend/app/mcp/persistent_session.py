@@ -33,6 +33,7 @@ class SessionLifecycleState(str, Enum):
     WARM = "WARM"
     RECONNECTING = "RECONNECTING"
     CIRCUIT_OPEN = "CIRCUIT_OPEN"
+    HALF_OPEN = "HALF_OPEN"
     SHUTTING_DOWN = "SHUTTING_DOWN"
     CLOSED = "CLOSED"
 
@@ -60,6 +61,7 @@ class PersistentServerSession:
         timeout: float = 30.0,
         heartbeat_interval: float = 30.0,
         max_reconnect_attempts: int = 3,
+        circuit_break_cooldown: float = 30.0,
     ):
         self.server_id = server_id
         self.server_name = server_name
@@ -70,11 +72,13 @@ class PersistentServerSession:
         self.timeout = float(timeout)
         self.heartbeat_interval = float(heartbeat_interval)
         self.max_reconnect_attempts = int(max_reconnect_attempts)
+        self.circuit_break_cooldown = float(circuit_break_cooldown)
 
         self._state = SessionLifecycleState.UNINITIALIZED
         self._session: Optional[ClientSession] = None
         self._init_result: Any = None
         self._consecutive_failures = 0
+        self._circuit_tripped_at: Optional[float] = None
         self._pid: Optional[int] = None
 
         # Thread and Event Loop ownership
@@ -174,19 +178,44 @@ class PersistentServerSession:
 
     async def _async_start(self) -> bool:
         """Internal connection logic running directly on owning loop."""
+        is_initiator = False
         async with self._state_lock:
             if self._state == SessionLifecycleState.WARM:
                 return True
-            if self._state == SessionLifecycleState.CONNECTING:
-                # Another coroutine is already connecting; wait on connection barrier
-                pass
 
-        if self._state == SessionLifecycleState.CONNECTING:
-            await self._connection_barrier.wait()
+            # Circuit breaker check: If OPEN, enforce cooldown period before attempting HALF_OPEN canary
+            if self._state == SessionLifecycleState.CIRCUIT_OPEN:
+                now = time.monotonic()
+                elapsed = now - (self._circuit_tripped_at or 0.0)
+                if elapsed < self.circuit_break_cooldown:
+                    remaining = self.circuit_break_cooldown - elapsed
+                    logger.warning(
+                        f"[{self.server_name}] Circuit breaker OPEN: fast-failing connection request. "
+                        f"Cooldown active ({remaining:.1f}s remaining)."
+                    )
+                    return False
+                else:
+                    logger.info(
+                        f"[{self.server_name}] Circuit breaker cooldown elapsed ({elapsed:.1f}s >= {self.circuit_break_cooldown}s). "
+                        f"Entering HALF_OPEN canary state."
+                    )
+                    self._state = SessionLifecycleState.HALF_OPEN
+                    is_initiator = True
+
+            elif self._state in (SessionLifecycleState.CONNECTING, SessionLifecycleState.HALF_OPEN):
+                # Another coroutine is already connecting or testing canary; wait on connection barrier
+                is_initiator = False
+            else:
+                self._state = SessionLifecycleState.CONNECTING
+                is_initiator = True
+
+        if not is_initiator:
+            if self._connection_barrier:
+                await self._connection_barrier.wait()
             return self._state == SessionLifecycleState.WARM
 
-        self._state = SessionLifecycleState.CONNECTING
-        self._connection_barrier.clear()
+        if self._connection_barrier:
+            self._connection_barrier.clear()
 
         # Launch session runner task
         self._runner_task = self._owning_loop.create_task(self._run_session_loop())
@@ -198,6 +227,7 @@ class PersistentServerSession:
         except asyncio.TimeoutError:
             logger.error(f"[{self.server_name}] Connection barrier timed out after {self.timeout}s.")
             self._state = SessionLifecycleState.CIRCUIT_OPEN
+            self._circuit_tripped_at = time.monotonic()
             return False
 
     async def _run_session_loop(self):
@@ -235,6 +265,7 @@ class PersistentServerSession:
                         self._init_result = await session.initialize()
                         self._state = SessionLifecycleState.WARM
                         self._consecutive_failures = 0
+                        self._circuit_tripped_at = None
                         reconnect_attempts = 0
                         self._connection_barrier.set()
                         logger.info(f"[{self.server_name}] Persistent session established & WARM (PID: {self._pid}).")
@@ -244,8 +275,22 @@ class PersistentServerSession:
 
                         # Monitor session loop until stop signal or transport disconnection
                         while not self._stop_event.is_set():
-                            if getattr(session._dispatcher, "_closed", False) or not getattr(session._dispatcher, "_running", True):
+                            # Check public AnyIO stream statistics first
+                            stream_closed = False
+                            try:
+                                if hasattr(read_stream, "statistics") and read_stream.statistics().open_send_streams == 0:
+                                    stream_closed = True
+                            except Exception:
+                                pass
+
+                            if not stream_closed:
+                                disp = getattr(session, "_dispatcher", None)
+                                if getattr(disp, "_closed", False) or not getattr(disp, "_running", True):
+                                    stream_closed = True
+
+                            if stream_closed:
                                 raise ConnectionError("MCP server transport closed unexpectedly (EOF / process terminated).")
+
                             try:
                                 await asyncio.wait_for(self._stop_event.wait(), timeout=0.25)
                                 break
@@ -273,6 +318,7 @@ class PersistentServerSession:
                 if self._consecutive_failures >= self.max_reconnect_attempts:
                     logger.error(f"[{self.server_name}] Reconnect limit ({self.max_reconnect_attempts}) reached. Tripping CIRCUIT_OPEN.")
                     self._state = SessionLifecycleState.CIRCUIT_OPEN
+                    self._circuit_tripped_at = time.monotonic()
                     self._connection_barrier.set() # Unblock waiters with failure
                     break
 
@@ -438,6 +484,7 @@ class PersistentSessionManager:
         env_vars: Optional[Dict[str, str]] = None,
         cwd: Optional[str] = None,
         timeout: float = 30.0,
+        circuit_break_cooldown: float = 30.0,
     ) -> PersistentServerSession:
         """Retrieves or lazily instantiates a persistent session for the given server ID."""
         with cls._lock:
@@ -451,7 +498,8 @@ class PersistentSessionManager:
                     env_vars=env_vars,
                     cwd=cwd,
                     timeout=timeout,
-                    heartbeat_interval=heartbeat
+                    heartbeat_interval=heartbeat,
+                    circuit_break_cooldown=circuit_break_cooldown,
                 )
             return cls._sessions[server_id]
 
