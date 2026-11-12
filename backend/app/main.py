@@ -33,6 +33,11 @@ Base.metadata.create_all(bind=engine)
 async def lifespan(app: FastAPI):
     await startup_seed()
     yield
+    try:
+        from app.mcp.persistent_session import PersistentSessionManager
+        await PersistentSessionManager.shutdown_all()
+    except Exception as e:
+        logger.warning(f"Error shutting down persistent MCP sessions: {e}")
 
 app = FastAPI(
     title=f"{settings.PROJECT_NAME} Control Plane",

@@ -1,10 +1,13 @@
 import datetime
+import os
+import sys
 from typing import List, Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
 from app.models.all_models import MCPServer, MCPTool, User
 from app.mcp.client import MCPClient, MCPClientError, MCPConnectionManager
 from app.services.audit_service import AuditService
 from app.services.policy_engine import PolicyEngine
+from app.core.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -39,6 +42,28 @@ class MCPManager:
     @staticmethod
     async def ping_server(server: MCPServer) -> Tuple[bool, float, str]:
         """Sends a protocol ping returning (success, latency_ms, message)."""
+        if getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False) and server.transport_type == "STDIO":
+            try:
+                from app.mcp.persistent_session import PersistentSessionManager
+                cmd = server.command
+                if not cmd or not os.path.exists(cmd):
+                    cmd = sys.executable
+                session = PersistentSessionManager.get_session(
+                    server_id=server.id,
+                    server_name=server.name,
+                    command=cmd,
+                    args=server.args or [],
+                    env_vars=server.env_vars or {},
+                    cwd=os.getcwd(),
+                    timeout=server.connection_timeout or 30.0
+                )
+                latency_ms = await session.send_ping()
+                MCPConnectionManager.record_success(server.id)
+                return True, latency_ms, "Pong received from persistent MCP session."
+            except Exception as e:
+                MCPConnectionManager.record_failure(server.id)
+                return False, 0.0, str(e)
+
         client = MCPManager.get_client_for_server(server)
         lock = MCPConnectionManager.get_lock(server.id)
         async with lock:
@@ -132,6 +157,43 @@ class MCPManager:
         # Circuit breaker check
         if MCPConnectionManager.is_circuit_open(server.id):
             return {}, 0.0, False, f"Circuit breaker OPEN for server '{server.name}' due to repeated failures. Automatic failover active."
+
+        if getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False) and server.transport_type == "STDIO":
+            try:
+                from app.mcp.persistent_session import PersistentSessionManager
+                cmd = server.command
+                if not cmd or not os.path.exists(cmd):
+                    cmd = sys.executable
+                res, duration_ms = await PersistentSessionManager.execute_tool(
+                    server_id=server.id,
+                    server_name=server.name,
+                    command=cmd,
+                    args=server.args or [],
+                    env_vars=server.env_vars or {},
+                    cwd=os.getcwd(),
+                    tool_name=tool.name,
+                    arguments=arguments,
+                    timeout=server.connection_timeout or 30.0
+                )
+                MCPConnectionManager.record_success(server.id)
+                
+                # Update metrics
+                tool.total_executions += 1
+                tool.last_executed_at = datetime.datetime.now(datetime.timezone.utc)
+                server.total_calls += 1
+                server.avg_response_time_ms = round((server.avg_response_time_ms * 0.8) + (duration_ms * 0.2), 2)
+                db.commit()
+
+                return res, duration_ms, True, None
+            except Exception as e:
+                tool.failed_executions += 1
+                server.error_rate = round(min(1.0, server.error_rate + 0.05), 3)
+                tripped = MCPConnectionManager.record_failure(server.id, server.name)
+                db.commit()
+                msg = f"Tool execution error: {str(e)}"
+                if tripped:
+                    msg += " [Circuit breaker TRIPPED to OPEN state]."
+                return {}, 0.0, False, msg
 
         client = MCPManager.get_client_for_server(server)
         lock = MCPConnectionManager.get_lock(server.id)
