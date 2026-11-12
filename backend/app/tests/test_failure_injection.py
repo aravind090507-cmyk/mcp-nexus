@@ -118,41 +118,35 @@ async def test_fi_02_termination_during_active_concurrent_requests():
 
 @pytest.mark.asyncio
 async def test_fi_03_repeated_server_crashes_trips_circuit_breaker():
-    """Failure Injection 3: Repeated crashes transition session to CIRCUIT_OPEN."""
+    """Failure Injection 3: Repeated genuine crashes transition session to CIRCUIT_OPEN with cooldown rejection & recovery."""
     session = PersistentServerSession(
-        server_id="fi-03",
-        server_name="FI Repeated Crashes",
+        server_id="fi-03-hardened",
+        server_name="FI Repeated Crashes Hardened",
         command=sys.executable,
-        args=[ERP_SCRIPT],
-        timeout=10.0,
+        args=["-c", "import sys; sys.exit(1)"], # Genuinely crashes immediately on launch
+        timeout=5.0,
         max_reconnect_attempts=2,
-        circuit_break_cooldown=5.0
+        circuit_break_cooldown=1.0
     )
-    await session.start()
-
-    # Crash 1
-    p1 = psutil.Process(session.pid)
-    p1.kill()
-    await asyncio.sleep(0.5)
-
-    # Crash 2 during reconnect attempt
-    if session.pid:
-        try:
-            psutil.Process(session.pid).kill()
-        except Exception:
-            pass
-    await asyncio.sleep(2.5)
-
-    # Trigger second reconnect failure by trying with dead session
-    try:
-        if session.pid:
-            psutil.Process(session.pid).kill()
-    except Exception:
-        pass
-
-    # When reconnect attempts are exhausted, state must be CIRCUIT_OPEN
+    # Start encounters failure 1, then backoff retry encounters failure 2 -> reaches limit 2
     ok = await session.start()
-    assert session.state in (SessionLifecycleState.CIRCUIT_OPEN, SessionLifecycleState.RECONNECTING, SessionLifecycleState.WARM)
+    assert ok is False
+    # Strict assertion verifying exact state and failure counting
+    assert session.state == SessionLifecycleState.CIRCUIT_OPEN
+    assert session._consecutive_failures >= 2
+
+    # Verify rejection during cooldown
+    with pytest.raises(RuntimeError) as exc_info:
+        await session.call_tool("get_project_status", {})
+    assert "CIRCUIT_OPEN" in str(exc_info.value) or "Cooldown active" in str(exc_info.value)
+
+    # Verify recovery behavior: Point args to valid server, wait out cooldown, and verify return to WARM
+    session.args = [ERP_SCRIPT]
+    await asyncio.sleep(1.1)
+
+    res, lat = await session.call_tool("get_project_status", {"project_id": "PRJ-MUM-001"})
+    assert session.state == SessionLifecycleState.WARM
+    assert "Mumbai" in res.get("name", "")
 
     await session.shutdown()
 
@@ -374,32 +368,30 @@ async def test_cb_01_circuit_breaker_fast_rejection_during_cooldown():
 
 @pytest.mark.asyncio
 async def test_cb_02_circuit_breaker_half_open_canary_recovery():
-    """Circuit Breaker 2: HALF_OPEN canary probe recovers after cooldown expires."""
-    # Use short 1.0s cooldown for testing
+    """Circuit Breaker 2: Genuinely trips circuit breaker without mutation, validates HALF_OPEN canary and return to WARM."""
+    # Use short 1.0s cooldown and max_reconnect_attempts=1 for clean testing
     session = PersistentServerSession(
-        server_id="cb-02",
-        server_name="CB Half Open",
+        server_id="cb-02-genuine",
+        server_name="CB Half Open Genuine",
         command=sys.executable,
-        args=[ERP_SCRIPT],
-        timeout=10.0,
+        args=["-c", "import sys; sys.exit(1)"], # Genuinely exits immediately
+        timeout=5.0,
         max_reconnect_attempts=1,
         circuit_break_cooldown=1.0
     )
-    await session.start()
-    assert session.state == SessionLifecycleState.WARM
+    # Attempt 1 fails -> trips to CIRCUIT_OPEN through genuine failure
+    ok = await session.start()
+    assert ok is False
+    assert session.state == SessionLifecycleState.CIRCUIT_OPEN
+    assert session._consecutive_failures >= 1
 
-    # Kill process to trip circuit breaker
-    psutil.Process(session.pid).kill()
-    await asyncio.sleep(0.5)
-
-    # Force circuit open by hitting reconnect attempt limit
-    session._consecutive_failures = 1
-    session._state = SessionLifecycleState.CIRCUIT_OPEN
-    session._circuit_tripped_at = time.monotonic()
-
-    # Immediate call during cooldown fast-fails
-    with pytest.raises(RuntimeError):
+    # Immediate call during cooldown fast-fails with RuntimeError without spawning processes
+    with pytest.raises(RuntimeError) as exc_info:
         await session.call_tool("get_project_status", {"project_id": "PRJ-MUM-001"})
+    assert "CIRCUIT_OPEN" in str(exc_info.value) or "Cooldown active" in str(exc_info.value)
+
+    # Point to valid server script to test HALF_OPEN canary
+    session.args = [ERP_SCRIPT]
 
     # Wait for cooldown window (1.0s) to elapse
     await asyncio.sleep(1.1)

@@ -24,6 +24,7 @@ import sys
 import os
 import asyncio
 import time
+import datetime
 import json
 import argparse
 import psutil
@@ -40,6 +41,7 @@ EQ_SCRIPT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", 
 async def run_soak(duration_sec: float, batch_size: int = 10, batch_delay: float = 0.05, out_file: str = "soak_test_metrics.jsonl"):
     proc = psutil.Process()
     start_time = time.time()
+    start_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     end_time = start_time + duration_sec
 
     # Start warm sessions for all 3 demo servers
@@ -140,8 +142,12 @@ async def run_soak(duration_sec: float, batch_size: int = 10, batch_delay: float
         final_rss = proc.memory_info().rss / (1024 * 1024)
         final_handles = proc.num_handles()
 
+        end_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         summary = {
-            "total_duration_sec": round(time.time() - start_time, 2),
+            "start_timestamp_utc": start_iso,
+            "end_timestamp_utc": end_iso,
+            "target_duration_sec": duration_sec,
+            "actual_duration_sec": round(time.time() - start_time, 2),
             "total_requests": total_requests,
             "total_failures": total_failures,
             "success_rate_pct": round(((total_requests - total_failures) / total_requests * 100.0) if total_requests > 0 else 0.0, 2),

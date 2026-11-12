@@ -1,14 +1,17 @@
 {
-  "total_duration_sec": 60.6,
-  "total_requests": 25035,
+  "start_timestamp_utc": "2026-11-12T11:55:04.482549+00:00",
+  "end_timestamp_utc": "2026-11-12T12:25:05.134314+00:00",
+  "target_duration_sec": 1800.0,
+  "actual_duration_sec": 1800.65,
+  "total_requests": 154550,
   "total_failures": 0,
   "success_rate_pct": 100.0,
-  "initial_rss_mb": 72.91,
-  "final_rss_mb": 74.25,
-  "net_memory_delta_mb": 1.34,
+  "initial_rss_mb": 72.79,
+  "final_rss_mb": 28.55,
+  "net_memory_delta_mb": -44.25,
   "initial_handles": 204,
-  "final_handles": 187,
-  "net_handle_delta": -17,
+  "final_handles": 184,
+  "net_handle_delta": -20,
   "final_child_count": 0,
-  "snapshots_recorded": 166
+  "snapshots_recorded": 1545
 }

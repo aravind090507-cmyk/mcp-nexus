@@ -275,18 +275,15 @@ class PersistentServerSession:
 
                         # Monitor session loop until stop signal or transport disconnection
                         while not self._stop_event.is_set():
-                            # Check public AnyIO stream statistics first
+                            # Check public AnyIO stream statistics to detect closed transport
                             stream_closed = False
                             try:
                                 if hasattr(read_stream, "statistics") and read_stream.statistics().open_send_streams == 0:
                                     stream_closed = True
+                                elif hasattr(write_stream, "statistics") and write_stream.statistics().open_receive_streams == 0:
+                                    stream_closed = True
                             except Exception:
                                 pass
-
-                            if not stream_closed:
-                                disp = getattr(session, "_dispatcher", None)
-                                if getattr(disp, "_closed", False) or not getattr(disp, "_running", True):
-                                    stream_closed = True
 
                             if stream_closed:
                                 raise ConnectionError("MCP server transport closed unexpectedly (EOF / process terminated).")
