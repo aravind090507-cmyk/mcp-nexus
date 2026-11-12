@@ -388,3 +388,66 @@ def test_circuit_breaker_resilience(client, admin_headers):
     MCPConnectionManager.reset_circuit(srv_id)
     assert MCPConnectionManager.is_circuit_open(srv_id) is False
 
+def test_agent_dynamic_planning_and_concurrency(client, admin_headers):
+    """Verify dynamic tool selection, parameter extraction, concurrent execution across 3 servers."""
+    agents_res = client.get("/api/v1/agents", headers=admin_headers)
+    assert agents_res.status_code == 200
+    agents = agents_res.json()
+    assert len(agents) >= 1
+    agent_id = agents[0]["id"]
+
+    # Prompt with cross-server correlation intent
+    req = {
+        "agent_id": agent_id,
+        "prompt": "Identify delayed projects across Hazira LNG expansion with crane maintenance alerts and flange stock deficits."
+    }
+    orch_res = client.post("/api/v1/agents/orchestrate", json=req, headers=admin_headers)
+    assert orch_res.status_code == 200
+    data = orch_res.json()
+
+    assert data["overall_status"] == "SUCCESS"
+    assert len(data["tool_executions"]) >= 3
+    # Check that tools from ERP, Equipment, and Inventory were called
+    servers_called = {t["server"] for t in data["tool_executions"]}
+    assert "ERP MCP Server" in servers_called
+    assert "Equipment MCP Server" in servers_called
+    assert "Inventory MCP Server" in servers_called
+
+    # Verify spans contain USER_REQUEST, AGENT_DECISION, POLICY_VALIDATION, MCP_SERVER, TOOL_EXECUTION, RESPONSE
+    stages = {s["stage"] for s in data["spans"]}
+    assert "USER_REQUEST" in stages
+    assert "AGENT_DECISION" in stages
+    assert "POLICY_VALIDATION" in stages
+    assert "MCP_SERVER" in stages
+    assert "TOOL_EXECUTION" in stages
+    assert "RESPONSE" in stages
+
+def test_agent_max_execution_steps_guard(client, admin_headers):
+    """Verify that execution limit guard halts orchestration when planned steps exceed agent limit."""
+    # Create an agent with max_execution_steps = 1
+    create_payload = {
+        "name": "Restricted Constrained Agent",
+        "identifier": "constrained-agent-01",
+        "description": "Agent strictly constrained to 1 step",
+        "model": "claude-3-5-sonnet",
+        "system_prompt": "You are a restricted agent.",
+        "max_execution_steps": 1
+    }
+    c_res = client.post("/api/v1/agents", json=create_payload, headers=admin_headers)
+    assert c_res.status_code == 200
+    constrained_agent_id = c_res.json()["id"]
+
+    # Send multi-step query requiring 3 steps
+    req = {
+        "agent_id": constrained_agent_id,
+        "prompt": "Correlate delayed projects, overdue maintenance and safety stock shortages across all servers."
+    }
+    orch_res = client.post("/api/v1/agents/orchestrate", json=req, headers=admin_headers)
+    assert orch_res.status_code == 200
+    data = orch_res.json()
+
+    assert data["overall_status"] == "BLOCKED"
+    assert "exceed agent max execution limit" in data["synthesis"].lower() or "halted" in data["synthesis"].lower()
+    assert len(data["tool_executions"]) == 0
+
+
