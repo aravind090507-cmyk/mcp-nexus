@@ -230,11 +230,33 @@ Every agent orchestration or standalone tool call generates a structured `Execut
 
 Built specifically to demonstrate cross-server operational intelligence for Larsen & Toubro (L&T Heavy Civil IC):
 
-### 7.1 Cross-Domain Correlation Dossier
+### 7.1 Construction Project Risk Intelligence (Flagship Demonstration)
+The flagship workflow (`CONSTRUCTION PROJECT RISK INTELLIGENCE`) evaluates multi-source operational data across three independent MCP servers to identify capital projects at risk.
+
+#### 10-Step Execution Sequence:
+1. **Understand Request**: Parses the natural-language task (*"Identify construction projects at risk due to delayed milestones, equipment failures and insufficient inventory"*).
+2. **Identify Required Information**: Maps data requirements to ERP project milestones, equipment maintenance/vibration telemetry, and inventory stock deficits.
+3. **Discover Tools Dynamically**: Dynamically queries active database records registered to online MCP servers (`get_project_status`, `get_maintenance_schedule`, `get_low_stock_items`).
+4. **Check User Permissions**: Enforces backend RBAC (`AGENTS_ORCHESTRATE`) and evaluates dynamic security policies before dispatch.
+5. **Create Execution Plan**: Plans concurrent read-only calls bounded by `agent.max_execution_steps`.
+6. **Execute Read-Only Calls Concurrently**: Dispatches parallel JSON-RPC calls via `asyncio.gather`.
+7. **Collect Responses**: Handles tool outputs and server timeouts gracefully without terminating.
+8. **Correlate Multi-Domain Information**: Links data by project identifier (`PRJ-HAZ-002`, `PRJ-MUM-001`, `PRJ-HYD-003`), active site, and warehouse yard.
+9. **Generate Structured Risk Assessment**: `RiskIntelligenceEngine` calculates project risk scores (0–100) and classifications (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`).
+10. **Store Execution Trace & Result**: Persists 6-stage lifecycle spans to `execution_traces` and audit history to `audit_logs`.
+
+### 7.2 Cross-Domain Risk Intelligence Correlation
 Correlates 3 distinct enterprise systems into a unified executive dossier:
-1. **ERP (SAP S/4HANA)**: Project identifiers (`PRJ-MM3-PKG1`), milestones (e.g. *Tunnel Boring Section 4B*), cost variance, and schedule burn rate.
-2. **Equipment (IBM Maximo)**: Heavy machinery telemetry (e.g. *TBM Terratec S-88*), hydraulic pressure alarms, vibration metrics, and maintenance logs.
-3. **Inventory (Oracle WMS)**: Warehouse yards (e.g. *Bandra-Kurla Complex Yard 4*), rebar batches, cryogenic flanges, and safety stock shortfalls.
+1. **ERP (SAP S/4HANA bridge)**: Project milestones (e.g. *Hazira Cryogenic LNG Expansion* `PRJ-HAZ-002`), cost variance, delayed status flags, and critical path items.
+2. **Equipment (IBM Maximo bridge)**: Heavy machinery telemetry (e.g. *Terex Demag CC-8800-1 Crane* `EQP-CRN-8800`), vibration alarms (6.8 mm/s vs 3.5 mm/s limit), and overdue slew bearing overhaul tasks (42 days overdue).
+3. **Inventory (Oracle WMS bridge)**: Warehouse yards (e.g. *Hazira Central Yard* `WH-HAZ-CENTRAL`), high-pressure cryogenic flanges `MAT-FLG-SS316` (0 units available, 40 deficit, 28-day lead time), and rebar `MAT-STL-500D` shortages.
+
+#### Risk Scoring Model:
+$$\text{Risk Score} = \min(100, S_{\text{milestone}} + S_{\text{equipment}} + S_{\text{inventory}})$$
+- **CRITICAL ($\ge 75$):** Active milestone delay with concurrent equipment breakdown alarm and zero safety stock (e.g. `PRJ-HAZ-002`).
+- **HIGH ($50 - 74$):** Overdue maintenance or material deficits threatening critical path.
+- **MEDIUM ($25 - 49$):** Project on track but spare parts near safety buffer (e.g. `PRJ-MUM-001`).
+- **LOW ($< 25$):** Nominal operations and sufficient inventory buffers (e.g. `PRJ-HYD-003`).
 
 ---
 

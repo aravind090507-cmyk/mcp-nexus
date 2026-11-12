@@ -177,6 +177,27 @@ class OrchestrationResponse(BaseModel):
     synthesis: str
     tool_executions: List[Dict[str, Any]]
     spans: List[Dict[str, Any]]
+    risk_assessment: Optional[Dict[str, Any]] = None
+
+# --- ENTERPRISE WORKFLOWS ---
+class WorkflowExecutionRequest(BaseModel):
+    workflow_id: Optional[str] = "construction-risk-intelligence"
+    prompt: Optional[str] = "Identify construction projects at risk due to delayed milestones, equipment failures and insufficient inventory."
+    agent_id: Optional[str] = None
+    project_filter: Optional[str] = None
+
+class WorkflowExecutionResponse(BaseModel):
+    workflow_id: str
+    workflow_name: str
+    trace_id: str
+    execution_status: str
+    duration_ms: float
+    server_progress: Dict[str, Any]
+    risk_assessment: Dict[str, Any]
+    synthesis: str
+    tool_executions: List[Dict[str, Any]]
+    spans: List[Dict[str, Any]]
+    dataset_notice: str
 
 # --- GOVERNANCE & APPROVALS ---
 class ApprovalOut(BaseModel):

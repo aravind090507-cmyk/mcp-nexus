@@ -113,11 +113,15 @@ Built from the ground up to reflect the information density of Linear, the opera
 - **Span Inspection Drawer**: Slide-over drawer providing raw JSON input and output payloads with one-click copying.
 - **Host Telemetry**: Real-time CPU, RAM, process RSS, and active thread counts measured dynamically via `psutil`.
 
-### 6. Enterprise Civil Engineering Workflow Intelligence
-- Dedicated `/workflows` workspace correlating three mission-critical domains for Larsen & Toubro:
-  1. **ERP (SAP S/4HANA)**: Project identifiers (`PRJ-MM3-PKG1`), milestones, and cost variance.
-  2. **Equipment (IBM Maximo)**: Machinery telemetry, hydraulic pressure alarms, and servicing backlogs.
-  3. **Inventory (Oracle WMS)**: Warehouse yards, rebar stock levels, and supply shortages.
+### 6. Enterprise Civil Engineering Workflow Intelligence (Flagship Demonstration)
+- Dedicated `/workflows` workspace featuring **Construction Project Risk Intelligence**:
+  - Investigates cross-domain enterprise data across three independent MCP servers:
+    1. **ERP MCP Server**: Project milestones, contract values, critical path items (`PRJ-HAZ-002`, `PRJ-MUM-001`, `PRJ-HYD-003`).
+    2. **Equipment MCP Server**: Heavy machinery telemetry, vibration indices, and overdue maintenance schedules (`EQP-CRN-8800` Terex Crane, `EQP-TBM-004` TBM, `EQP-PLR-1400` Piling Rig).
+    3. **Inventory MCP Server**: Warehouse yards, cryogenic flanges (`MAT-FLG-SS316`), and structural rebar (`MAT-STL-500D`) safety stock shortages.
+  - 10-step autonomous sequence: request analysis, dynamic tool discovery, permission evaluation, concurrent read-only execution (`asyncio.gather`), cross-domain correlation, structured risk assessment (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`), and immutable trace persistence.
+  - Interactive Evidence Panel displaying factual JSON outputs supporting every finding.
+  - Explicit demarcation: **SYNTHETIC DEMONSTRATION DATA (L&T Heavy Civil IC Simulation)**.
 
 ### 7. Interactive Infrastructure Topology Map
 - Full graph visualization with **React Flow** linking AI agents, central gateway, MCP servers, and enterprise databases with live telemetry edges.
@@ -178,40 +182,52 @@ docker-compose up --build
 
 ## Automated Test Results
 
-The backend test suite (`backend/app/tests/test_backend.py`) verifies all 23 core capabilities:
+The backend test suite (`backend/app/tests/test_backend.py`) verifies all 35 capabilities (23 core platform tests + 12 flagship workflow intelligence tests):
 
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.14.3, pytest-9.2.0, pluggy-1.7.0
 rootdir: C:\Users\Aravind\OneDrive\Desktop\MCP nexus
 plugins: anyio-4.14.2, asyncio-1.4.1
-collected 23 items
+collected 35 items
 
-backend/app/tests/test_backend.py::test_root PASSED                      [  4%]
-backend/app/tests/test_backend.py::test_auth_rejection_without_token PASSED [  8%]
-backend/app/tests/test_backend.py::test_role_switcher_token_generation PASSED [ 13%]
-backend/app/tests/test_backend.py::test_unauthorized_role_execution_forbidden PASSED [ 17%]
-backend/app/tests/test_backend.py::test_servers_and_tools_discovery PASSED [ 21%]
-backend/app/tests/test_backend.py::test_command_center_metrics PASSED    [ 26%]
-backend/app/tests/test_backend.py::test_playground_tool_execution PASSED [ 30%]
-backend/app/tests/test_backend.py::test_sensitive_tool_approval_enforcement PASSED [ 34%]
-backend/app/tests/test_backend.py::test_approval_workflow_review PASSED  [ 39%]
-backend/app/tests/test_backend.py::test_dual_person_approval_workflow PASSED [ 43%]
-backend/app/tests/test_backend.py::test_security_audit_events_logged PASSED [ 47%]
-backend/app/tests/test_backend.py::test_tool_config_update PASSED        [ 52%]
-backend/app/tests/test_backend.py::test_mcp_server_failure_handling PASSED [ 56%]
-backend/app/tests/test_backend.py::test_agent_cross_server_orchestration PASSED [ 60%]
-backend/app/tests/test_backend.py::test_infrastructure_topology PASSED   [ 65%]
-backend/app/tests/test_backend.py::test_mcp_protocol_capabilities_and_ping PASSED [ 69%]
-backend/app/tests/test_backend.py::test_mcp_resources_and_prompts_discovery PASSED [ 73%]
-backend/app/tests/test_backend.py::test_circuit_breaker_resilience PASSED [ 78%]
-backend/app/tests/test_backend.py::test_agent_dynamic_planning_and_concurrency PASSED [ 82%]
-backend/app/tests/test_backend.py::test_agent_max_execution_steps_guard PASSED [ 86%]
-backend/app/tests/test_backend.py::test_policy_crud_operations PASSED    [ 91%]
-backend/app/tests/test_backend.py::test_policy_engine_dynamic_evaluation_rule PASSED [ 95%]
-backend/app/tests/test_backend.py::test_mcp_auto_discovery_endpoint PASSED [100%]
+backend/app/tests/test_backend.py::test_root PASSED                      [  2%]
+backend/app/tests/test_backend.py::test_auth_rejection_without_token PASSED [  5%]
+backend/app/tests/test_backend.py::test_role_switcher_token_generation PASSED [  8%]
+backend/app/tests/test_backend.py::test_unauthorized_role_execution_forbidden PASSED [ 11%]
+backend/app/tests/test_backend.py::test_servers_and_tools_discovery PASSED [ 14%]
+backend/app/tests/test_backend.py::test_command_center_metrics PASSED    [ 17%]
+backend/app/tests/test_backend.py::test_playground_tool_execution PASSED [ 20%]
+backend/app/tests/test_backend.py::test_sensitive_tool_approval_enforcement PASSED [ 22%]
+backend/app/tests/test_backend.py::test_approval_workflow_review PASSED  [ 25%]
+backend/app/tests/test_backend.py::test_dual_person_approval_workflow PASSED [ 28%]
+backend/app/tests/test_backend.py::test_security_audit_events_logged PASSED [ 31%]
+backend/app/tests/test_backend.py::test_tool_config_update PASSED        [ 34%]
+backend/app/tests/test_backend.py::test_mcp_server_failure_handling PASSED [ 37%]
+backend/app/tests/test_backend.py::test_agent_cross_server_orchestration PASSED [ 40%]
+backend/app/tests/test_backend.py::test_infrastructure_topology PASSED   [ 42%]
+backend/app/tests/test_backend.py::test_mcp_protocol_capabilities_and_ping PASSED [ 45%]
+backend/app/tests/test_backend.py::test_mcp_resources_and_prompts_discovery PASSED [ 48%]
+backend/app/tests/test_backend.py::test_circuit_breaker_resilience PASSED [ 51%]
+backend/app/tests/test_backend.py::test_agent_dynamic_planning_and_concurrency PASSED [ 54%]
+backend/app/tests/test_backend.py::test_agent_max_execution_steps_guard PASSED [ 57%]
+backend/app/tests/test_backend.py::test_policy_crud_operations PASSED    [ 60%]
+backend/app/tests/test_backend.py::test_policy_engine_dynamic_evaluation_rule PASSED [ 62%]
+backend/app/tests/test_backend.py::test_mcp_auto_discovery_endpoint PASSED [ 65%]
+backend/app/tests/test_backend.py::test_workflow_successful_cross_server PASSED [ 68%]
+backend/app/tests/test_backend.py::test_workflow_dynamic_tool_discovery PASSED [ 71%]
+backend/app/tests/test_backend.py::test_workflow_concurrent_read_only_execution PASSED [ 74%]
+backend/app/tests/test_backend.py::test_workflow_missing_server_handling PASSED [ 77%]
+backend/app/tests/test_backend.py::test_workflow_mcp_server_timeout PASSED [ 80%]
+backend/app/tests/test_backend.py::test_workflow_invalid_tool_response PASSED [ 82%]
+backend/app/tests/test_backend.py::test_workflow_permission_rejection PASSED [ 85%]
+backend/app/tests/test_backend.py::test_workflow_approval_enforcement PASSED [ 88%]
+backend/app/tests/test_backend.py::test_workflow_risk_calculation PASSED [ 91%]
+backend/app/tests/test_backend.py::test_workflow_evidence_traceability PASSED [ 94%]
+backend/app/tests/test_backend.py::test_workflow_execution_trace_creation PASSED [ 97%]
+backend/app/tests/test_backend.py::test_workflow_failure_recovery PASSED [100%]
 
-====================== 23 passed, 142 warnings in 4.65s =======================
+====================== 35 passed, 325 warnings in 9.00s =======================
 ```
 
 ---

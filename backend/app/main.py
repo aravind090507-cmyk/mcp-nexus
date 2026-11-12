@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.database.session import Base, engine, SessionLocal
 from app.api.routes import (
-    auth, servers, tools, agents, governance, traces, metrics, topology, integrations, settings as settings_route
+    auth, servers, tools, agents, workflows, governance, traces, metrics, topology, integrations, settings as settings_route
 )
 from app.models.all_models import (
     Organization, User, MCPServer, MCPTool, AIAgent, IntegrationConfig, ExecutionTrace, SecurityEvent, AuditLog
@@ -46,6 +46,7 @@ app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
 app.include_router(servers.router, prefix=settings.API_V1_PREFIX)
 app.include_router(tools.router, prefix=settings.API_V1_PREFIX)
 app.include_router(agents.router, prefix=settings.API_V1_PREFIX)
+app.include_router(workflows.router, prefix=settings.API_V1_PREFIX)
 app.include_router(governance.router, prefix=settings.API_V1_PREFIX)
 app.include_router(traces.router, prefix=settings.API_V1_PREFIX)
 app.include_router(metrics.router, prefix=settings.API_V1_PREFIX)

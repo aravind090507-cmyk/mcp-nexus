@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.all_models import AIAgent, MCPServer, MCPTool, ExecutionTrace, User
 from app.services.mcp_manager import MCPManager
 from app.services.policy_engine import PolicyEngine, PolicyDecision
+from app.services.risk_intelligence_engine import RiskIntelligenceEngine
 from app.core.config import settings
 import logging
 import httpx
@@ -632,7 +633,14 @@ class AgentOrchestrator:
                     "output": exec_res.get("parsed") or exec_res
                 })
 
-        # 6. DYNAMIC FACTUAL SYNTHESIS
+        # 6. DYNAMIC FACTUAL SYNTHESIS & RISK INTELLIGENCE CORRELATION
+        risk_assessment = None
+        if executed_results:
+            try:
+                risk_assessment = RiskIntelligenceEngine.correlate_and_assess_risk(executed_results)
+            except Exception as e:
+                logger.warning(f"Risk assessment calculation failed: {e}")
+
         synthesis_text = AgentOrchestrator._synthesize_enterprise_results(
             executed_results=executed_results,
             overall_status=overall_status,
@@ -671,7 +679,7 @@ class AgentOrchestrator:
             tool_name=", ".join([s["tool"] for s in plan_steps]) if plan_steps else "none",
             user_query=user_prompt,
             input_parameters={"steps": plan_steps},
-            output_response={"synthesis": synthesis_text, "results": executed_results},
+            output_response={"synthesis": synthesis_text, "results": executed_results, "risk_assessment": risk_assessment},
             error_details=blocked_reason,
             status=overall_status,
             duration_ms=total_duration,
@@ -696,7 +704,8 @@ class AgentOrchestrator:
             "duration_ms": total_duration,
             "synthesis": synthesis_text,
             "tool_executions": executed_results,
-            "spans": spans
+            "spans": spans,
+            "risk_assessment": risk_assessment
         }
 
     @staticmethod

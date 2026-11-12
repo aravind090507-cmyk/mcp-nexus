@@ -157,6 +157,36 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ agent_id, prompt }),
     }),
+  orchestrateAgent: (agent_id: string, prompt: string) =>
+    fetchJSON<any>('/agents/orchestrate', {
+      method: 'POST',
+      body: JSON.stringify({ agent_id, prompt }),
+    }),
+
+  // Enterprise Workflows
+  getWorkflowScenarios: () => fetchJSON<any[]>('/workflows/scenarios'),
+  executeWorkflow: (data: {
+    workflow_id?: string;
+    prompt?: string;
+    agent_id?: string;
+    project_filter?: string;
+  }) =>
+    fetchJSON<{
+      workflow_id: string;
+      workflow_name: string;
+      trace_id: string;
+      execution_status: string;
+      duration_ms: number;
+      server_progress: Record<string, any>;
+      risk_assessment: Record<string, any>;
+      synthesis: string;
+      tool_executions: any[];
+      spans: any[];
+      dataset_notice: string;
+    }>('/workflows/execute', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 
   // Governance & Approvals
   getApprovals: (status_filter?: string) =>

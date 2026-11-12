@@ -88,7 +88,40 @@ When an operational inquiry requires data from multiple independent servers (e.g
 
 ---
 
-## 4. Failure Recovery & Step Guards
+## 5. Construction Project Risk Intelligence Workflow
 
-1. **Step Limit Guard:** If an agent's planned execution steps exceed `agent.max_execution_steps`, the pipeline halts immediately with status `BLOCKED` and records an `Execution Limit Guard Violation` span.
-2. **Graceful Degradation:** If an individual server times out or fails, the orchestrator catches the error, records a diagnostic recovery span, and completes partial synthesis for the remaining successful servers rather than terminating the agent.
+### 5.1 Business Scenario & Execution Sequence
+The flagship workflow `CONSTRUCTION PROJECT RISK INTELLIGENCE` enables infrastructure operations teams to enter:
+> *"Identify construction projects at risk due to delayed milestones, equipment failures and insufficient inventory."*
+
+The orchestrator executes a 10-step sequence across 3 independent MCP servers:
+1. **Understand User Request:** Parses prompt intent and extracts target domain parameters.
+2. **Identify Required Information:** Maps requirements to project milestones (ERP), machinery maintenance & vibration alarms (Equipment), and inventory safety stock deficits (Inventory).
+3. **Discover Relevant MCP Tools Dynamically:** Queries active database records registered to online MCP servers (`get_project_status`, `get_maintenance_schedule`, `get_low_stock_items`).
+4. **Check User Permissions:** Evaluates backend RBAC (`AGENTS_ORCHESTRATE`) and Policy Engine dynamic rules before dispatch.
+5. **Create Execution Plan:** Formulates a concurrent-safe read-only dispatch plan bounded by `max_execution_steps`.
+6. **Execute Concurrent Read-Only Tool Calls:** Dispatches parallel JSON-RPC calls via `asyncio.gather` through `MCPManager`.
+7. **Collect Responses:** Gathers parsed JSON responses; handles missing servers or timeouts gracefully without terminating.
+8. **Correlate Domain Information:** Cross-references data by project code, machinery site, and warehouse location.
+9. **Generate Structured Risk Assessment:** The `RiskIntelligenceEngine` calculates project risk scores (0–100) and classifications (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`).
+10. **Store Execution Trace & Result:** Commits an `ExecutionTrace` with 6-stage lifecycle spans and logs audit records to `AuditService`.
+
+### 5.2 Structured Risk Assessment Schema
+For every evaluated project, the risk engine outputs:
+- `project_id`: Unique project identifier (e.g. `PRJ-HAZ-002`)
+- `project_name`: Descriptive capital project title
+- `overall_risk`: `CRITICAL` | `HIGH` | `MEDIUM` | `LOW`
+- `risk_score`: Quantitative risk score from 0 to 100
+- `erp_status`: Milestone health and completion percentage
+- `affected_equipment`: Overdue machinery and sensor alarm descriptions
+- `affected_materials`: Out-of-stock items, safety stock deficits, and replenishment lead times
+- `evidence`: Provable evidence points derived directly from actual MCP tool responses
+- `business_impact`: Operational disruption assessment
+- `recommended_action`: Remediation action plan
+- `source_servers`: Online MCP servers providing supporting data
+
+### 5.3 Governance & Safety Controls
+- **Read-Only by Default:** The risk intelligence workflow operates in read-only analysis mode and never mutates project or asset records automatically.
+- **Zero-Trust Token Validation:** Enforces cryptographically verified JWT tokens with issuer and audience validation.
+- **Anti-Self-Approval Gate:** If any mutating recommendations (such as `report_equipment_issue`) are queued, the system mandates two distinct administrative approvers and strictly rejects requester self-approval.
+- **Synthetic Data Transparency:** Clearly demarcated with `SYNTHETIC DEMONSTRATION DATA (L&T Heavy Civil IC Simulation)`. No direct connectivity to proprietary L&T S/4HANA or Maximo instances is claimed.

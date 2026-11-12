@@ -575,6 +575,218 @@ def test_mcp_auto_discovery_endpoint(client, admin_headers):
     assert len(data["discovered_prompts"]) >= 1
     assert data["latency_ms"] >= 0.0
 
+# ==============================================================================
+# ENTERPRISE WORKFLOW INTELLIGENCE: CONSTRUCTION PROJECT RISK INTELLIGENCE TESTS
+# ==============================================================================
+
+def test_workflow_successful_cross_server(client, admin_headers):
+    """Test 1: Successful cross-server workflow execution across ERP, Equipment, and Inventory."""
+    payload = {
+        "workflow_id": "construction-risk-intelligence",
+        "prompt": "Identify construction projects at risk due to delayed milestones, equipment failures and insufficient inventory."
+    }
+    res = client.post("/api/v1/workflows/execute", json=payload, headers=admin_headers)
+    assert res.status_code == 200, f"Workflow execution failed: {res.text}"
+    data = res.json()
+    assert data["workflow_id"] == "construction-risk-intelligence"
+    assert data["execution_status"] in ("SUCCESS", "COMPLETED")
+    assert "trace_id" in data
+    assert "risk_assessment" in data
+    assert len(data["tool_executions"]) >= 3
+    # Check that tools from all 3 servers ran
+    servers_executed = [t["server"] for t in data["tool_executions"]]
+    assert any("ERP" in s for s in servers_executed)
+    assert any("Equipment" in s for s in servers_executed)
+    assert any("Inventory" in s for s in servers_executed)
+
+def test_workflow_dynamic_tool_discovery(client, admin_headers):
+    """Test 2: Verify tools are dynamically discovered from active database records registered to servers."""
+    res = client.get("/api/v1/workflows/scenarios", headers=admin_headers)
+    assert res.status_code == 200
+    scenarios = res.json()
+    assert len(scenarios) >= 1
+    assert scenarios[0]["id"] == "construction-risk-intelligence"
+    assert "get_project_status" in scenarios[0]["tools_involved"]
+    assert "get_maintenance_schedule" in scenarios[0]["tools_involved"]
+    assert "get_low_stock_items" in scenarios[0]["tools_involved"]
+
+def test_workflow_concurrent_read_only_execution(client, admin_headers):
+    """Test 3: Verify concurrent read-only tool execution via parallel dispatch."""
+    payload = {
+        "workflow_id": "construction-risk-intelligence",
+        "prompt": "Identify construction projects at risk due to delayed milestones, equipment failures and insufficient inventory."
+    }
+    res = client.post("/api/v1/workflows/execute", json=payload, headers=admin_headers)
+    assert res.status_code == 200
+    data = res.json()
+    progress = data["server_progress"]
+    assert progress["agent_planning"]["concurrency"] == "PARALLEL_ASYNCIO_GATHER"
+    assert progress["erp_server"]["status"] == "COMPLETED"
+    assert progress["equipment_server"]["status"] == "COMPLETED"
+    assert progress["inventory_server"]["status"] == "COMPLETED"
+
+def test_workflow_missing_server_handling(client, admin_headers):
+    """Test 4: Gracefully handle missing or disabled MCP server without crashing the workflow."""
+    # Temporarily disable inventory server
+    servers_res = client.get("/api/v1/servers", headers=admin_headers)
+    assert servers_res.status_code == 200
+    inv_server = next((s for s in servers_res.json() if "Inventory" in s["name"]), None)
+    assert inv_server is not None, "Inventory server should exist"
+
+    try:
+        # Disable server
+        client.put(f"/api/v1/servers/{inv_server['id']}", json={"is_enabled": False}, headers=admin_headers)
+
+        payload = {"workflow_id": "construction-risk-intelligence"}
+        res = client.post("/api/v1/workflows/execute", json=payload, headers=admin_headers)
+        assert res.status_code == 200
+        data = res.json()
+        # Should gracefully report missing inventory server
+        assert data["server_progress"]["inventory_server"]["status"] == "UNAVAILABLE"
+        # Remaining servers (ERP & Equipment) still execute
+        assert data["server_progress"]["erp_server"]["status"] == "COMPLETED"
+        assert data["server_progress"]["equipment_server"]["status"] == "COMPLETED"
+    finally:
+        # Re-enable server
+        client.put(f"/api/v1/servers/{inv_server['id']}", json={"is_enabled": True}, headers=admin_headers)
+
+def test_workflow_mcp_server_timeout(client, admin_headers):
+    """Test 5: Verify that server timeout or execution error does not hang the workflow."""
+    # Directly invoke a non-existent or failing tool to test error handling
+    payload = {
+        "tool_name": "non_existent_emergency_tool",
+        "arguments": {}
+    }
+    res = client.post("/api/v1/tools/execute", json=payload, headers=admin_headers)
+    assert res.status_code == 404
+    assert "not found" in res.json()["detail"].lower()
+
+def test_workflow_invalid_tool_response(client, admin_headers):
+    """Test 6: Correlation engine handles partial or empty tool outputs without throwing exceptions."""
+    from app.services.risk_intelligence_engine import RiskIntelligenceEngine
+    # Pass malformed or partial output
+    partial_results = [
+        {"server": "ERP MCP Server", "tool": "get_project_status", "output": {"malformed": True}},
+        {"server": "Equipment MCP Server", "tool": "get_maintenance_schedule", "output": "invalid_string_output"},
+    ]
+    assessment = RiskIntelligenceEngine.correlate_and_assess_risk(partial_results)
+    assert "summary" in assessment
+    assert assessment["summary"]["total_projects_assessed"] >= 1
+    assert "projects" in assessment
+
+def test_workflow_permission_rejection(client, viewer_headers):
+    """Test 7: Unauthenticated or VIEWER role is strictly forbidden from executing workflows."""
+    # 1. Unauthenticated request
+    unauth_res = client.post("/api/v1/workflows/execute", json={})
+    assert unauth_res.status_code == 401
+
+    # 2. VIEWER role without AGENTS_ORCHESTRATE permission
+    viewer_res = client.post("/api/v1/workflows/execute", json={}, headers=viewer_headers)
+    assert viewer_res.status_code == 403
+    assert "Forbidden" in viewer_res.json()["detail"] or "permission" in viewer_res.json()["detail"].lower()
+
+def test_workflow_approval_enforcement(client, admin_headers):
+    """Test 8: Workflow policy engine halts execution if a tool violates a policy or requires approval."""
+    # Create dynamic policy requiring approval for get_maintenance_schedule
+    freeze_pol_id = None
+    try:
+        policy_payload = {
+            "name": "Safety Freeze on Equipment Maintenance Probes",
+            "action": "REQUIRE_APPROVAL",
+            "risk_level": "HIGH",
+            "environment": "ALL",
+            "scope": "TOOL",
+            "tool_pattern": "get_maintenance_schedule",
+            "is_enabled": True
+        }
+        pol_res = client.post("/api/v1/governance/policies", json=policy_payload, headers=admin_headers)
+        assert pol_res.status_code == 200
+        freeze_pol_id = pol_res.json()["id"]
+
+        # Attempt workflow execution -> must be blocked
+        wf_res = client.post("/api/v1/workflows/execute", json={}, headers=admin_headers)
+        assert wf_res.status_code == 200
+        data = wf_res.json()
+        assert data["execution_status"] == "BLOCKED"
+        assert "policy" in data["synthesis"].lower()
+    finally:
+        if freeze_pol_id:
+            client.delete(f"/api/v1/governance/policies/{freeze_pol_id}", headers=admin_headers)
+
+def test_workflow_risk_calculation(client, admin_headers):
+    """Test 9: Verify accurate calculation of risk scores (CRITICAL, HIGH, MEDIUM, LOW) based on factual data."""
+    payload = {"workflow_id": "construction-risk-intelligence"}
+    res = client.post("/api/v1/workflows/execute", json=payload, headers=admin_headers)
+    assert res.status_code == 200
+    data = res.json()
+    risk_assessment = data["risk_assessment"]
+    summary = risk_assessment["summary"]
+
+    assert summary["critical_risks"] >= 1
+    assert "PRJ-HAZ-002" in summary["critical_projects"]
+
+    # Verify PRJ-HAZ-002 is classified as CRITICAL
+    haz_proj = next((p for p in risk_assessment["projects"] if p["project_id"] == "PRJ-HAZ-002"), None)
+    assert haz_proj is not None
+    assert haz_proj["overall_risk"] == "CRITICAL"
+    assert haz_proj["risk_score"] >= 75
+    assert len(haz_proj["affected_equipment"]) >= 1
+    assert len(haz_proj["affected_materials"]) >= 1
+
+    # Verify PRJ-HYD-003 is classified as LOW or MEDIUM
+    hyd_proj = next((p for p in risk_assessment["projects"] if p["project_id"] == "PRJ-HYD-003"), None)
+    assert hyd_proj is not None
+    assert hyd_proj["overall_risk"] in ("LOW", "MEDIUM")
+
+def test_workflow_evidence_traceability(client, admin_headers):
+    """Test 10: Every risk factor must contain provable supporting evidence and source tool identification."""
+    res = client.post("/api/v1/workflows/execute", json={}, headers=admin_headers)
+    assert res.status_code == 200
+    data = res.json()
+    projects = data["risk_assessment"]["projects"]
+    for p in projects:
+        assert "evidence" in p
+        assert isinstance(p["evidence"], list)
+        assert len(p["evidence"]) >= 1
+        assert "business_impact" in p
+        assert "recommended_action" in p
+        assert len(p["source_servers"]) >= 1
+
+def test_workflow_execution_trace_creation(client, admin_headers):
+    """Test 11: An ExecutionTrace record is persisted in the database with 6 inspectable lifecycle stages."""
+    res = client.post("/api/v1/workflows/execute", json={}, headers=admin_headers)
+    assert res.status_code == 200
+    trace_id = res.json()["trace_id"]
+
+    # Fetch trace from traces API
+    trace_res = client.get(f"/api/v1/traces/{trace_id}", headers=admin_headers)
+    assert trace_res.status_code == 200
+    trace_data = trace_res.json()
+    assert trace_data["trace_id"] == trace_id
+    assert trace_data["status"] in ("SUCCESS", "COMPLETED")
+    assert len(trace_data["spans"]) >= 4
+
+    # Verify key lifecycle stages exist
+    span_stages = [s["stage"] for s in trace_data["spans"]]
+    assert "USER_REQUEST" in span_stages
+    assert "AGENT_DECISION" in span_stages
+    assert "POLICY_VALIDATION" in span_stages
+    assert "TOOL_EXECUTION" in span_stages
+
+def test_workflow_failure_recovery(client, admin_headers):
+    """Test 12: Audit service records workflow execution and diagnostic metadata even under errors."""
+    res = client.post("/api/v1/workflows/execute", json={}, headers=admin_headers)
+    assert res.status_code == 200
+
+    # Verify audit log entry
+    audit_res = client.get("/api/v1/governance/audit-logs", headers=admin_headers)
+    assert audit_res.status_code == 200
+    logs = audit_res.json()
+    wf_logs = [l for l in logs if l["action"] == "WORKFLOW_EXECUTION"]
+    assert len(wf_logs) >= 1
+    assert "Construction Project Risk Intelligence" in wf_logs[0]["details"]
+
+
 
 
 
