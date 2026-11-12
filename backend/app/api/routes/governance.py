@@ -62,8 +62,11 @@ async def review_approval(
         raise HTTPException(status_code=404, detail="Approval request not found.")
 
     # 1. Expiration Verification
-    now = datetime.datetime.utcnow()
-    if req.expires_at and now > req.expires_at and req.status in ("PENDING", "PARTIALLY_APPROVED"):
+    now = datetime.datetime.now(datetime.timezone.utc)
+    expires_at = req.expires_at
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+    if expires_at and now > expires_at and req.status in ("PENDING", "PARTIALLY_APPROVED"):
         req.status = "EXPIRED"
         db.commit()
         AuditService.record(
@@ -307,11 +310,11 @@ def update_security_policy(
     if not pol:
         raise HTTPException(status_code=404, detail="Security Policy not found.")
 
-    update_data = req.dict(exclude_unset=True)
+    update_data = req.model_dump(exclude_unset=True)
     for field, val in update_data.items():
         setattr(pol, field, val)
 
-    pol.updated_at = datetime.datetime.utcnow()
+    pol.updated_at = datetime.datetime.now(datetime.timezone.utc)
     db.commit()
     db.refresh(pol)
 

@@ -84,7 +84,7 @@ def update_tool_config(
     if data.description is not None:
         tool.description = data.description
 
-    tool.updated_at = datetime.datetime.utcnow()
+    tool.updated_at = datetime.datetime.now(datetime.timezone.utc)
     db.commit()
     db.refresh(tool)
 
@@ -128,7 +128,7 @@ async def execute_playground_tool(
             risk_level=risk_level,
             status="PENDING",
             requires_dual_approval=(risk_level == "CRITICAL"),
-            expires_at=datetime.datetime.utcnow() + datetime.timedelta(hours=24),
+            expires_at=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=24),
             reason="Playground execution flagged for administrative sign-off"
         )
         db.add(app_req)
@@ -216,11 +216,11 @@ async def execute_playground_tool(
         authorization_decision="PERMITTED",
         policy_evaluated="Default Permission Policy",
         spans=[
-            {"stage": "USER_REQUEST", "name": "Playground Call", "status": "COMPLETED", "duration_ms": 1.0, "timestamp": datetime.datetime.utcnow().isoformat()},
-            {"stage": "POLICY_VALIDATION", "name": "Policy Engine Check", "status": "COMPLETED", "duration_ms": 2.0, "timestamp": datetime.datetime.utcnow().isoformat()},
-            {"stage": "MCP_SERVER", "name": f"STDIO Handshake: {server.name}", "status": "COMPLETED", "duration_ms": 3.0, "timestamp": datetime.datetime.utcnow().isoformat()},
-            {"stage": "TOOL_EXECUTION", "name": f"Call {tool.name}", "status": "COMPLETED" if is_success else "FAILED", "duration_ms": duration_ms, "timestamp": datetime.datetime.utcnow().isoformat()},
-            {"stage": "RESPONSE", "name": "Payload Serialization", "status": "COMPLETED", "duration_ms": 1.5, "timestamp": datetime.datetime.utcnow().isoformat()}
+            {"stage": "USER_REQUEST", "name": "Playground Call", "status": "COMPLETED", "duration_ms": 1.0, "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+            {"stage": "POLICY_VALIDATION", "name": "Policy Engine Check", "status": "COMPLETED", "duration_ms": 2.0, "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+            {"stage": "MCP_SERVER", "name": f"STDIO Handshake: {server.name}", "status": "COMPLETED", "duration_ms": 3.0, "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+            {"stage": "TOOL_EXECUTION", "name": f"Call {tool.name}", "status": "COMPLETED" if is_success else "FAILED", "duration_ms": duration_ms, "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+            {"stage": "RESPONSE", "name": "Payload Serialization", "status": "COMPLETED", "duration_ms": 1.5, "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()}
         ]
     )
     db.add(trace)

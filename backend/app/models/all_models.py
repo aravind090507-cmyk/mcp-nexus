@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Boolean, Integer, Float, DateTime, ForeignKey, Text, JSON, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 from app.database.session import Base
@@ -7,6 +7,10 @@ from app.core.permissions import RoleEnum
 
 def generate_uuid() -> str:
     return str(uuid.uuid4())
+
+def utc_now() -> datetime:
+    """Returns timezone-aware UTC datetime."""
+    return datetime.now(timezone.utc)
 
 class Organization(Base):
     __tablename__ = "organizations"
@@ -16,8 +20,8 @@ class Organization(Base):
     slug = Column(String(100), unique=True, nullable=False)
     description = Column(Text, nullable=True)
     tier = Column(String(50), default="ENTERPRISE")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     users = relationship("User", back_populates="organization", cascade="all, delete-orphan")
     servers = relationship("MCPServer", back_populates="organization", cascade="all, delete-orphan")
@@ -35,8 +39,8 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     department = Column(String(100), default="Operations")
     last_login = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     organization = relationship("Organization", back_populates="users")
     approval_requests = relationship("ApprovalRequest", back_populates="requesting_user", foreign_keys="ApprovalRequest.requesting_user_id")
@@ -60,12 +64,12 @@ class MCPServer(Base):
     status = Column(String(50), default="HEALTHY")        # HEALTHY, DEGRADED, UNHEALTHY, DISCONNECTED
     connection_timeout = Column(Integer, default=15)      # in seconds
     is_enabled = Column(Boolean, default=True)
-    last_health_check = Column(DateTime, default=datetime.utcnow)
+    last_health_check = Column(DateTime, default=utc_now)
     avg_response_time_ms = Column(Float, default=45.0)
     error_rate = Column(Float, default=0.0)
     total_calls = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     organization = relationship("Organization", back_populates="servers")
     tools = relationship("MCPTool", back_populates="server", cascade="all, delete-orphan")
@@ -85,8 +89,8 @@ class MCPTool(Base):
     total_executions = Column(Integer, default=0)
     failed_executions = Column(Integer, default=0)
     last_executed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     server = relationship("MCPServer", back_populates="tools")
     agent_permissions = relationship("AgentToolPermission", back_populates="tool", cascade="all, delete-orphan")
@@ -106,9 +110,9 @@ class AIAgent(Base):
     max_execution_steps = Column(Integer, default=5)
     execution_policy = Column(String(50), default="STRICT") # STRICT, PERMISSIVE, AUDITED
     total_orchestrations = Column(Integer, default=0)
-    last_active_at = Column(DateTime, default=datetime.utcnow)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_active_at = Column(DateTime, default=utc_now)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     organization = relationship("Organization", back_populates="agents")
     server_assignments = relationship("AgentServerAssignment", back_populates="agent", cascade="all, delete-orphan")
@@ -120,7 +124,7 @@ class AgentServerAssignment(Base):
     id = Column(String(36), primary_key=True, default=generate_uuid)
     agent_id = Column(String(36), ForeignKey("ai_agents.id"), nullable=False)
     server_id = Column(String(36), ForeignKey("mcp_servers.id"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
 
     agent = relationship("AIAgent", back_populates="server_assignments")
     server = relationship("MCPServer", back_populates="agent_assignments")
@@ -132,7 +136,7 @@ class AgentToolPermission(Base):
     agent_id = Column(String(36), ForeignKey("ai_agents.id"), nullable=False)
     tool_id = Column(String(36), ForeignKey("mcp_tools.id"), nullable=False)
     is_permitted = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
 
     agent = relationship("AIAgent", back_populates="tool_permissions")
     tool = relationship("MCPTool", back_populates="agent_permissions")
@@ -161,7 +165,7 @@ class ApprovalRequest(Base):
 
     reviewed_by = Column(String(36), ForeignKey("users.id"), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
 
     requesting_user = relationship("User", foreign_keys=[requesting_user_id], back_populates="approval_requests")
     reviewer = relationship("User", foreign_keys=[reviewed_by])
@@ -192,7 +196,7 @@ class ExecutionTrace(Base):
     authorization_decision = Column(String(50), default="PERMITTED") # PERMITTED, DENIED, ELEVATED
     policy_evaluated = Column(String(255), nullable=True)
     spans = Column(JSON, default=list)                   # Timeline breakdown array: [UserReq, AgentDec, PolicyVal, MCPDispatch, ToolExec, Resp]
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=utc_now, index=True)
 
 class SecurityPolicy(Base):
     __tablename__ = "security_policies"
@@ -208,8 +212,8 @@ class SecurityPolicy(Base):
     tool_pattern = Column(String(255), nullable=True)       # e.g. "report_equipment_issue", "delete_*", "*"
     argument_conditions = Column(JSON, default=dict)        # e.g. {"severity": ["CRITICAL", "HIGH"]}
     is_enabled = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
 class SecurityEvent(Base):
     __tablename__ = "security_events"
@@ -222,7 +226,7 @@ class SecurityEvent(Base):
     description = Column(Text, nullable=False)
     ip_address = Column(String(45), default="127.0.0.1")
     metadata_json = Column(JSON, default=dict)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now, index=True)
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -235,7 +239,7 @@ class AuditLog(Base):
     role = Column(String(50), default="ADMIN")
     details = Column(Text, nullable=True)
     diff = Column(JSON, default=dict)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now, index=True)
 
 class IntegrationConfig(Base):
     __tablename__ = "integration_configs"
@@ -248,6 +252,6 @@ class IntegrationConfig(Base):
     endpoint = Column(String(512), nullable=True)
     linked_mcp_server = Column(String(100), nullable=True)
     sync_interval_mins = Column(Integer, default=15)
-    last_sync = Column(DateTime, default=datetime.utcnow)
+    last_sync = Column(DateTime, default=utc_now)
     stats = Column(JSON, default=dict)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)

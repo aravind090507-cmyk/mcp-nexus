@@ -4,7 +4,7 @@ from sqlalchemy import func
 from app.models.all_models import (
     MCPServer, MCPTool, AIAgent, ExecutionTrace, ApprovalRequest, SecurityEvent, AuditLog
 )
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 class MonitoringService:
     @staticmethod
@@ -89,7 +89,7 @@ class MonitoringService:
         ]
 
         # Execution activity over time: compute from actual traces + historical baseline
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         activity_chart = []
         for i in range(11, -1, -1):
             bucket_time = now - timedelta(hours=i * 2)

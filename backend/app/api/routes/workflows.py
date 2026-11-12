@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 import uuid
 import time
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 from app.database.session import get_db
@@ -74,7 +74,7 @@ async def execute_construction_risk_workflow(
         "stage": "USER_REQUEST",
         "name": "Step 1: User Request Ingestion & Intent Extraction",
         "status": "COMPLETED",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "duration_ms": round((time.perf_counter() - t_step1) * 1000.0 + 1.1, 2),
         "details": {
             "workflow_id": req.workflow_id or "construction-risk-intelligence",
@@ -109,7 +109,7 @@ async def execute_construction_risk_workflow(
         "stage": "AGENT_DECISION",
         "name": "Step 2: Identify Required Information Domains",
         "status": "COMPLETED",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "duration_ms": round((time.perf_counter() - t_step2) * 1000.0 + 1.5, 2),
         "details": required_info
     })
@@ -138,7 +138,7 @@ async def execute_construction_risk_workflow(
         "stage": "MCP_SERVER",
         "name": "Step 3: Dynamic MCP Tool Discovery",
         "status": "COMPLETED",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "duration_ms": round((time.perf_counter() - t_step3) * 1000.0 + 2.0, 2),
         "details": {
             "total_tools_discovered": len(discovered_tools),
@@ -184,7 +184,7 @@ async def execute_construction_risk_workflow(
         "stage": "AGENT_DECISION",
         "name": "Step 5: Execution Plan Formulation",
         "status": "COMPLETED",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "duration_ms": round((time.perf_counter() - t_step5) * 1000.0 + 3.0, 2),
         "details": {
             "plan_steps": plan_steps,
@@ -222,7 +222,7 @@ async def execute_construction_risk_workflow(
                 "stage": "MCP_SERVER",
                 "name": f"Server Resolution: {s_name}",
                 "status": "FAILED",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "duration_ms": 1.0,
                 "details": {"error": f"MCP Server '{s_name}' is unavailable."}
             })
@@ -240,7 +240,7 @@ async def execute_construction_risk_workflow(
             "stage": "POLICY_VALIDATION",
             "name": f"Step 4: Governance Gate #{idx} ({t_name})",
             "status": "COMPLETED" if decision == PolicyDecision.PERMITTED else "BLOCKED",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "duration_ms": 2.5,
             "details": {
                 "server": server.name,
@@ -324,7 +324,7 @@ async def execute_construction_risk_workflow(
                 "stage": "TOOL_EXECUTION",
                 "name": "Concurrent Dispatch Exception",
                 "status": "FAILED",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "duration_ms": 1.0,
                 "details": {"error": str(r)}
             })
@@ -341,7 +341,7 @@ async def execute_construction_risk_workflow(
                 "stage": "TOOL_EXECUTION",
                 "name": f"Step 6: Execute {r['tool'].name} on {srv_name}",
                 "status": "COMPLETED",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "duration_ms": r["duration_ms"],
                 "details": {
                     "server": srv_name,
@@ -364,7 +364,7 @@ async def execute_construction_risk_workflow(
                 "stage": "TOOL_EXECUTION",
                 "name": f"Step 6: Execute {r['tool'].name} on {srv_name} (Failed)",
                 "status": "FAILED",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "duration_ms": r["duration_ms"],
                 "details": {"error": r["err_msg"]}
             })
@@ -382,7 +382,7 @@ async def execute_construction_risk_workflow(
         "stage": "RESPONSE",
         "name": "Step 8 & 9: Cross-Domain Correlation & Risk Assessment",
         "status": "COMPLETED",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "duration_ms": round((time.perf_counter() - t_step9) * 1000.0 + 2.0, 2),
         "details": {
             "total_projects_evaluated": risk_assessment["summary"]["total_projects_assessed"],
@@ -505,7 +505,7 @@ async def execute_construction_risk_workflow(
 
     if agent:
         agent.total_orchestrations += 1
-        agent.last_active_at = datetime.utcnow()
+        agent.last_active_at = datetime.now(timezone.utc)
 
     AuditService.record(
         db, "WORKFLOW_EXECUTION", "WORKFLOW", trace_id,

@@ -2,7 +2,7 @@ import uuid
 import time
 import json
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 from app.models.all_models import AIAgent, MCPServer, MCPTool, ExecutionTrace, User
@@ -292,7 +292,7 @@ class AgentOrchestrator:
             "stage": "USER_REQUEST",
             "name": "User Query Ingestion",
             "status": "COMPLETED",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "duration_ms": round((time.perf_counter() - t_user) * 1000.0 + 1.2, 2),
             "details": {
                 "user": user.email,
@@ -331,7 +331,7 @@ class AgentOrchestrator:
                 "stage": "AGENT_DECISION",
                 "name": "Execution Limit Guard Violation",
                 "status": "BLOCKED",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "duration_ms": plan_duration_ms,
                 "details": {
                     "error": f"Plan steps ({len(plan_steps)}) exceed agent max execution limit ({agent.max_execution_steps})",
@@ -357,7 +357,7 @@ class AgentOrchestrator:
             "stage": "AGENT_DECISION",
             "name": f"Agent Reasoning ({mode})",
             "status": "COMPLETED",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "duration_ms": plan_duration_ms,
             "details": {
                 "agent_name": agent.name,
@@ -399,7 +399,7 @@ class AgentOrchestrator:
                         "stage": "MCP_SERVER",
                         "name": f"Server Resolution: {s_name}",
                         "status": "FAILED",
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                         "duration_ms": 1.0,
                         "details": {"error": f"MCP Server '{s_name}' is not registered."}
                     })
@@ -420,7 +420,7 @@ class AgentOrchestrator:
                     "stage": "POLICY_VALIDATION",
                     "name": f"Governance Check #{idx}: {t_name}",
                     "status": "COMPLETED" if decision == PolicyDecision.PERMITTED else "BLOCKED",
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "duration_ms": 2.8,
                     "details": {
                         "tool": t_name,
@@ -465,7 +465,7 @@ class AgentOrchestrator:
                             "stage": "TOOL_EXECUTION",
                             "name": "Concurrent Execution Exception",
                             "status": "FAILED",
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
                             "duration_ms": 1.0,
                             "details": {"error": str(b)}
                         })
@@ -478,7 +478,7 @@ class AgentOrchestrator:
                         "stage": "MCP_SERVER",
                         "name": f"Protocol Dispatch: {b['server'].name}",
                         "status": "COMPLETED",
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                         "duration_ms": 1.8,
                         "details": {
                             "transport": b["server"].transport_type,
@@ -492,7 +492,7 @@ class AgentOrchestrator:
                             "stage": "TOOL_EXECUTION",
                             "name": f"Execute: {b['tool'].name}",
                             "status": "COMPLETED",
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
                             "duration_ms": b["duration_ms"],
                             "details": {
                                 "tool": b["tool"].name,
@@ -513,7 +513,7 @@ class AgentOrchestrator:
                             "stage": "TOOL_EXECUTION",
                             "name": f"Execute: {b['tool'].name} (Failed)",
                             "status": "FAILED",
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
                             "duration_ms": b["duration_ms"],
                             "details": {"error": b["err_msg"]}
                         })
@@ -536,7 +536,7 @@ class AgentOrchestrator:
                         "stage": "MCP_SERVER",
                         "name": f"Server Resolution: {s_name}",
                         "status": "FAILED",
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                         "duration_ms": 1.0,
                         "details": {"error": f"MCP Server '{s_name}' is not registered."}
                     })
@@ -556,7 +556,7 @@ class AgentOrchestrator:
                     "stage": "POLICY_VALIDATION",
                     "name": f"Governance Check #{idx}: {t_name}",
                     "status": "COMPLETED" if decision == PolicyDecision.PERMITTED else "BLOCKED",
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "duration_ms": 3.2,
                     "details": {
                         "tool": t_name,
@@ -577,7 +577,7 @@ class AgentOrchestrator:
                     "stage": "MCP_SERVER",
                     "name": f"Protocol Dispatch: {server.name}",
                     "status": "COMPLETED",
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "duration_ms": 2.1,
                     "details": {
                         "transport": server.transport_type,
@@ -594,7 +594,7 @@ class AgentOrchestrator:
                         "stage": "TOOL_EXECUTION",
                         "name": f"Execute: {t_name} (Failed)",
                         "status": "FAILED",
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                         "duration_ms": duration_ms,
                         "details": {"error": err_msg}
                     })
@@ -603,7 +603,7 @@ class AgentOrchestrator:
                         "stage": "TOOL_EXECUTION",
                         "name": "Error Recovery & Fallback Inspection",
                         "status": "COMPLETED",
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                         "duration_ms": 1.2,
                         "details": {"recovery_action": f"Logged failure on {server.name}. Graceful diagnostic compilation."}
                     })
@@ -615,7 +615,7 @@ class AgentOrchestrator:
                         "stage": "TOOL_EXECUTION",
                         "name": f"Execute: {t_name}",
                         "status": "COMPLETED",
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                         "duration_ms": duration_ms,
                         "details": {
                             "tool": t_name,
@@ -655,7 +655,7 @@ class AgentOrchestrator:
             "stage": "RESPONSE",
             "name": "Synthesized Result Delivery",
             "status": "COMPLETED",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "duration_ms": 2.2,
             "details": {
                 "total_duration_ms": total_duration,
@@ -691,7 +691,7 @@ class AgentOrchestrator:
         db.add(trace)
 
         agent.total_orchestrations += 1
-        agent.last_active_at = datetime.utcnow()
+        agent.last_active_at = datetime.now(timezone.utc)
         db.commit()
 
         return {

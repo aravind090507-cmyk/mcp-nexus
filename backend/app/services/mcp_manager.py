@@ -118,7 +118,7 @@ class MCPManager:
             discovered_tools.append(tool)
 
         server.status = "HEALTHY"
-        server.last_health_check = datetime.datetime.utcnow()
+        server.last_health_check = datetime.datetime.now(datetime.timezone.utc)
         db.commit()
         return discovered_tools
 
@@ -142,7 +142,7 @@ class MCPManager:
                 
                 # Update metrics
                 tool.total_executions += 1
-                tool.last_executed_at = datetime.datetime.utcnow()
+                tool.last_executed_at = datetime.datetime.now(datetime.timezone.utc)
                 server.total_calls += 1
                 server.avg_response_time_ms = round((server.avg_response_time_ms * 0.8) + (duration_ms * 0.2), 2)
                 db.commit()

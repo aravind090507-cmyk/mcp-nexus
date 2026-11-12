@@ -6,7 +6,7 @@ import time
 import uuid
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple, Callable
 import httpx
 from mcp import ClientSession, StdioServerParameters
@@ -484,7 +484,7 @@ class MCPConnectionManager:
                 "title": f"Circuit Breaker TRIPPED: {server_name}",
                 "root_cause": "Repeated transport communication failures exceeded resilience threshold (3 consecutive errors).",
                 "status": "ACTIVE",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "resolved_at": None,
                 "actions_taken": "Automatic failover activated. Subprocess traffic isolated."
             })
@@ -504,7 +504,7 @@ class MCPConnectionManager:
         for inc in cls._incidents:
             if inc.get("server_id") == server_id and inc.get("status") == "ACTIVE":
                 inc["status"] = "RESOLVED"
-                inc["resolved_at"] = datetime.utcnow().isoformat()
+                inc["resolved_at"] = datetime.now(timezone.utc).isoformat()
                 inc["actions_taken"] += " Circuit manually reset and recalibrated by Administrator."
 
     @classmethod
@@ -516,7 +516,7 @@ class MCPConnectionManager:
         for inc in cls._incidents:
             if inc.get("status") == "ACTIVE":
                 inc["status"] = "RESOLVED"
-                inc["resolved_at"] = datetime.utcnow().isoformat()
+                inc["resolved_at"] = datetime.now(timezone.utc).isoformat()
                 inc["actions_taken"] += " System-wide circuit reset applied."
 
     @classmethod

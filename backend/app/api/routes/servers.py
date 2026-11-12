@@ -110,10 +110,10 @@ def update_server(
     if not server:
         raise HTTPException(status_code=404, detail="MCP Server not found.")
 
-    for k, v in data.dict(exclude_unset=True).items():
+    for k, v in data.model_dump(exclude_unset=True).items():
         setattr(server, k, v)
     
-    server.updated_at = datetime.datetime.utcnow()
+    server.updated_at = datetime.datetime.now(datetime.timezone.utc)
     db.commit()
     db.refresh(server)
 
@@ -159,7 +159,7 @@ async def connect_server(
     if ok:
         server.status = "HEALTHY"
         server.avg_response_time_ms = latency
-        server.last_health_check = datetime.datetime.utcnow()
+        server.last_health_check = datetime.datetime.now(datetime.timezone.utc)
         db.commit()
         # Refresh tools
         tools = await MCPManager.discover_tools(db, server)
@@ -172,7 +172,7 @@ async def connect_server(
         }
     else:
         server.status = "UNHEALTHY"
-        server.last_health_check = datetime.datetime.utcnow()
+        server.last_health_check = datetime.datetime.now(datetime.timezone.utc)
         db.commit()
         return {
             "status": "UNHEALTHY",
@@ -233,7 +233,7 @@ async def ping_server_endpoint(
     ok, lat, msg = await MCPManager.ping_server(server)
     if ok:
         server.avg_response_time_ms = lat
-        server.last_health_check = datetime.datetime.utcnow()
+        server.last_health_check = datetime.datetime.now(datetime.timezone.utc)
         db.commit()
     return {"server_id": server.id, "success": ok, "latency_ms": lat, "message": msg}
 
@@ -273,7 +273,7 @@ def get_server_logs(
     if not server:
         raise HTTPException(status_code=404, detail="MCP Server not found.")
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     logs = [
         f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] INFO [mcp-nexus] Initialized transport {server.transport_type} for '{server.name}'",
         f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] INFO [mcp-protocol] JSON-RPC 2.0 handshake verified. Capabilities: tools, resources",

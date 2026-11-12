@@ -1,8 +1,9 @@
 import sys
 import os
 import asyncio
+from contextlib import asynccontextmanager
 
-if sys.platform == "win32":
+if sys.platform == "win32" and sys.version_info < (3, 14):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from fastapi import FastAPI, Request
@@ -28,13 +29,19 @@ logger = logging.getLogger("mcp-nexus")
 # Create database tables
 Base.metadata.create_all(bind=engine)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await startup_seed()
+    yield
+
 app = FastAPI(
     title=f"{settings.PROJECT_NAME} Control Plane",
     description="Enterprise AI Integration, Orchestration & Governance Platform for Model Context Protocol (MCP)",
     version=settings.VERSION,
     docs_url="/docs",
     redoc_url="/redoc",
-    openapi_url="/openapi.json"
+    openapi_url="/openapi.json",
+    lifespan=lifespan
 )
 
 # CORS
@@ -74,13 +81,12 @@ def root():
 def health():
     return {
         "status": "HEALTHY",
-        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "database": "CONNECTED",
         "governance_engine": "ACTIVE"
     }
 
 # Seed realistic enterprise data on first run
-@app.on_event("startup")
 async def startup_seed():
     from app.mcp.client import MCPConnectionManager
     MCPConnectionManager.reset_all_circuits()

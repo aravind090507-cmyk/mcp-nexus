@@ -35,5 +35,5 @@ def get_system_health(
         "active_threads": proc.num_threads(),
         "open_mcp_connections": active_servers,
         "governance_engine": "ACTIVE_ENFORCING",
-        "timestamp": datetime.datetime.utcnow().isoformat()
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
     }

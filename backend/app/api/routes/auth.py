@@ -8,7 +8,7 @@ from app.core.security import verify_password, create_access_token, get_password
 from app.api.deps import get_current_user
 from app.core.permissions import RoleEnum
 from app.core.config import settings
-from datetime import datetime
+from datetime import datetime, timezone
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -38,7 +38,7 @@ def login(creds: UserLogin, request: Request, db: Session = Depends(get_db)):
     if not user.is_active:
         raise HTTPException(status_code=400, detail="User account is deactivated.")
     
-    user.last_login = datetime.utcnow()
+    user.last_login = datetime.now(timezone.utc)
     db.commit()
 
     token = create_access_token(user.id)

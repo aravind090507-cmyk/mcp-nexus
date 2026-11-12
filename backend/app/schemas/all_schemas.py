@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -22,8 +22,7 @@ class UserOut(BaseModel):
     department: Optional[str] = None
     is_active: bool
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class Token(BaseModel):
     access_token: str
@@ -88,8 +87,7 @@ class MCPToolOut(BaseModel):
     failed_executions: int
     last_executed_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class MCPToolUpdate(BaseModel):
     risk_level: Optional[str] = None
@@ -116,8 +114,7 @@ class MCPServerOut(BaseModel):
     total_calls: int
     tools: List[MCPToolOut] = []
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # --- TOOL PLAYGROUND ---
 class ToolExecuteRequest(BaseModel):
@@ -159,8 +156,7 @@ class AIAgentOut(BaseModel):
     last_active_at: Optional[datetime] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class OrchestrationRequest(BaseModel):
     agent_id: str
@@ -263,8 +259,7 @@ class SecurityPolicyOut(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class SecurityEventOut(BaseModel):
     id: str
@@ -276,8 +271,7 @@ class SecurityEventOut(BaseModel):
     ip_address: str
     timestamp: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class AuditLogOut(BaseModel):
     id: str
@@ -290,8 +284,7 @@ class AuditLogOut(BaseModel):
     diff: Dict[str, Any] = {}
     timestamp: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # --- TRACES ---
 class TraceOut(BaseModel):
@@ -308,8 +301,7 @@ class TraceOut(BaseModel):
     authorization_decision: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class TraceDetailOut(TraceOut):
     input_parameters: Dict[str, Any]

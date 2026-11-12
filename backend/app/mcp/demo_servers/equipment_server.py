@@ -6,7 +6,7 @@ Complies with Model Context Protocol (MCP) JSON-RPC 2.0 STDIO transport.
 import sys
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="[EQP-MCP] %(asctime)s - %(message)s")
 
@@ -172,7 +172,7 @@ def handle_call_tool(name: str, args: dict) -> dict:
         sev = args.get("severity", "MEDIUM").upper()
         desc = args.get("description", "")
         
-        ticket_id = f"TKT-SAFETY-{int(datetime.utcnow().timestamp())}"
+        ticket_id = f"TKT-SAFETY-{int(datetime.now(timezone.utc).timestamp())}"
         # Update in-memory state
         if eq_id in EQUIPMENT_DATABASE:
             EQUIPMENT_DATABASE[eq_id]["telemetry_status"] = f"FAULT_RECORDED_{sev}"
@@ -181,7 +181,7 @@ def handle_call_tool(name: str, args: dict) -> dict:
             "incident_ticket_id": ticket_id,
             "equipment_id": eq_id,
             "severity": sev,
-            "logged_at": datetime.utcnow().isoformat(),
+            "logged_at": datetime.now(timezone.utc).isoformat(),
             "status": "LOGGED_ALERT_DISPATCHED",
             "message": f"Critical incident {ticket_id} created for {eq_id}. Telemetry status updated."
         }
