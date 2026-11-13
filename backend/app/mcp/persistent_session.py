@@ -29,8 +29,8 @@ def sanitize_log_data(data: Any, max_len: int = 512) -> Any:
     """Recursively redacts sensitive keys such as passwords, tokens, API keys, credentials, and authorization headers."""
     import re
     SENSITIVE_KEYS = {
-        "password", "passwd", "secret", "token", "auth_token", "api_key", 
-        "apikey", "authorization", "access_token", "refresh_token", 
+        "password", "passwd", "secret", "token", "auth_token", "api_key",
+        "apikey", "authorization", "access_token", "refresh_token",
         "private_key", "credential", "client_secret"
     }
     if isinstance(data, dict):
@@ -72,7 +72,7 @@ class SessionLifecycleState(str, Enum):
 class PersistentServerSession:
     """
     Manages the persistent lifecycle of a single Model Context Protocol (MCP) server.
-    
+
     Architecture:
     - Owns an OS subprocess via official stdio_client.
     - Manages an official ClientSession with protocol version negotiation (2024-11-05).
@@ -258,7 +258,7 @@ class PersistentServerSession:
 
         # Launch session runner task
         self._runner_task = self._owning_loop.create_task(self._run_session_loop())
-        
+
         # Await connection barrier
         try:
             await asyncio.wait_for(self._connection_barrier.wait(), timeout=self.timeout)
@@ -544,7 +544,7 @@ class PersistentServerSession:
 class PersistentSessionManager:
     """
     Centralized Registry & Lifecycle Supervisor for Persistent MCP Sessions.
-    
+
     Provides thread-safe singleton access, lazy initialization, multi-server isolation,
     and graceful shutdown coordination across all enterprise MCP servers.
     """
@@ -682,6 +682,19 @@ class PersistentSessionManager:
             timeout=timeout
         )
         return await session.call_tool(tool_name, arguments)
+
+    @classmethod
+    def shutdown_session(cls, server_id: str, timeout: float = 2.0):
+        """Gracefully shuts down and removes an individual persistent session (server-specific rollback)."""
+        with cls._lock:
+            session = cls._sessions.pop(server_id, None)
+        if session:
+            logger.info(f"Shutting down persistent session for server '{server_id}'...")
+            if session._owning_loop and session._owning_loop.is_running():
+                try:
+                    asyncio.run_coroutine_threadsafe(session.shutdown(timeout=timeout), session._owning_loop)
+                except Exception as e:
+                    logger.warning(f"Error shutting down session '{server_id}': {e}")
 
     @classmethod
     async def shutdown_all(cls, timeout: float = 3.0):

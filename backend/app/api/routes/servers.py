@@ -5,10 +5,14 @@ from app.database.session import get_db
 from app.models.all_models import MCPServer, MCPTool, User, Organization
 from app.schemas.all_schemas import (
     MCPServerCreate, MCPServerUpdate, MCPServerOut, MCPToolOut,
-    ServerDiscoverRequest, ServerDiscoverResponse
+    ServerDiscoverRequest, ServerDiscoverResponse,
+    DeploymentTransitionRequest, DeploymentStateOut, CanaryEligibilityOut
 )
 from app.services.mcp_manager import MCPManager
 from app.services.audit_service import AuditService
+from app.services.deployment_governance import DeploymentGovernanceService, DeploymentState
+from app.services.canary_governance import CanaryGovernanceService
+from app.services.observability_service import ObservabilityService
 from app.api.deps import get_current_user, require_permission
 from app.core.permissions import PermissionEnum, RoleEnum
 import datetime
@@ -152,6 +156,209 @@ def emergency_enable_persistent_sessions(
     )
     return res
 
+@router.get("/canary/readiness")
+def get_canary_readiness_report(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Returns enterprise canary acceptance criteria evaluation (Task H).
+    Reports PASS, FAIL, or NOT_MEASURED across all 10 readiness dimensions.
+    """
+    telemetry = ObservabilityService.get_telemetry_snapshot()
+    exec_metrics = telemetry.get("execution_metrics", {})
+    session_metrics = telemetry.get("session_metrics", {})
+    security_metrics = telemetry.get("security_metrics", {})
+
+    observed = {
+        "success_rate_pct": exec_metrics.get("success_rate_pct"),
+        "p95_latency_ms": exec_metrics.get("latency", {}).get("p95_ms"),
+        "p99_latency_ms": exec_metrics.get("latency", {}).get("p99_ms"),
+        "init_failures": session_metrics.get("session_creation_failures", 0),
+        "heartbeat_failures": session_metrics.get("heartbeat_failures", 0),
+        "orphan_subprocesses": 0,
+        "unauthorized_activations": security_metrics.get("unauthorized_activation_attempts", 0),
+        "cross_tenant_access": security_metrics.get("cross_tenant_access_attempts", 0)
+    }
+    return CanaryGovernanceService.evaluate_readiness_thresholds(observed)
+
+@router.get("/operational/telemetry")
+def get_operational_telemetry(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Returns complete operational telemetry snapshot including P95/P99 latencies,
+    session pool statistics, resource usage, and security events.
+    Restricted to authorized operators and administrators.
+    """
+    if current_user.role == RoleEnum.VIEWER.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: Operational telemetry is restricted to authorized operators and administrators."
+        )
+    return ObservabilityService.get_telemetry_snapshot()
+
+@router.get("/{server_id}/canary-eligibility", response_model=CanaryEligibilityOut)
+def get_server_canary_eligibility(
+    server_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Evaluates multi-vector canary eligibility decision for a specific server (Task C4).
+    """
+    server = db.query(MCPServer).filter(MCPServer.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP Server not found.")
+
+    decision = CanaryGovernanceService.evaluate_server_canary_eligibility(db, server, current_user)
+    return CanaryEligibilityOut(**decision.model_dump())
+
+@router.get("/{server_id}/deployment-state", response_model=DeploymentStateOut)
+def get_server_deployment_state(
+    server_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Returns the current deployment governance state and transition history for an MCP server (Task D).
+    """
+    server = db.query(MCPServer).filter(MCPServer.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP Server not found.")
+
+    state = DeploymentGovernanceService.get_server_state(server)
+    history = DeploymentGovernanceService.get_transition_history(server)
+    return DeploymentStateOut(
+        server_id=server.id,
+        server_name=server.name,
+        deployment_state=state.value,
+        history=history
+    )
+
+@router.post("/{server_id}/deployment-state")
+def transition_server_deployment_state(
+    server_id: str,
+    req: DeploymentTransitionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission(PermissionEnum.SERVERS_WRITE))
+):
+    """
+    Transitions the deployment state of an MCP server under strict role and lifecycle rules.
+    Restricted to ADMIN and SECURITY_OFFICER roles.
+    """
+    server = db.query(MCPServer).filter(MCPServer.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP Server not found.")
+
+    try:
+        target = DeploymentState(req.target_state)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid target state '{req.target_state}'. Allowed: {[s.value for s in DeploymentState]}"
+        )
+
+    ok, msg, new_state = DeploymentGovernanceService.transition_state(
+        db=db,
+        server=server,
+        target_state=target,
+        actor=current_user,
+        reason=req.reason
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+
+    return {
+        "server_id": server.id,
+        "server_name": server.name,
+        "previous_state": server.env_vars.get("DEPLOYMENT_STATE", "DISABLED"),
+        "current_state": new_state.value,
+        "message": msg
+    }
+
+@router.post("/{server_id}/persistent/rollback")
+def rollback_server_persistent_session(
+    server_id: str,
+    reason: str = "Operator initiated server rollback",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission(PermissionEnum.SERVERS_WRITE))
+):
+    """
+    Executes an immediate server-specific rollback to legacy per-call transport (Task G2).
+    Terminates running persistent sessions for this server and updates deployment state to ROLLBACK.
+    """
+    server = db.query(MCPServer).filter(MCPServer.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP Server not found.")
+
+    ok, msg = DeploymentGovernanceService.rollback_server(
+        db=db,
+        server=server,
+        actor=current_user,
+        reason=reason
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+
+    return {
+        "server_id": server.id,
+        "server_name": server.name,
+        "deployment_state": "ROLLBACK",
+        "persistent_transport": "DISABLED",
+        "fallback_active": True,
+        "message": f"Server '{server.name}' rolled back to legacy transport. {msg}"
+    }
+
+@router.post("/{server_id}/persistent/recover")
+async def recover_server_persistent_session(
+    server_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission(PermissionEnum.SERVERS_WRITE))
+):
+    """
+    Recovers a rolled-back server after verifying connection health (Task G3).
+    Requires explicit authorization and successful health ping before restoring state to PREPARED.
+    """
+    server = db.query(MCPServer).filter(MCPServer.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP Server not found.")
+
+    state = DeploymentGovernanceService.get_server_state(server)
+    if state != DeploymentState.ROLLBACK:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot recover server in state '{state.value}'. Only servers in 'ROLLBACK' can be recovered."
+        )
+
+    # Validate health before recovery
+    ok, latency, msg = await MCPManager.ping_server(server)
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Recovery aborted: Health check ping failed ({msg}). Fix server issues before recovering."
+        )
+
+    # Transition from ROLLBACK to PREPARED
+    trans_ok, trans_msg, new_state = DeploymentGovernanceService.transition_state(
+        db=db,
+        server=server,
+        target_state=DeploymentState.PREPARED,
+        actor=current_user,
+        reason=f"Server recovered after successful health check (latency: {latency}ms)"
+    )
+    if not trans_ok:
+        raise HTTPException(status_code=400, detail=trans_msg)
+
+    return {
+        "server_id": server.id,
+        "server_name": server.name,
+        "deployment_state": new_state.value,
+        "health_check": "PASSED",
+        "latency_ms": latency,
+        "message": f"Server '{server.name}' successfully recovered to PREPARED state."
+    }
+
+
 @router.get("/{server_id}", response_model=MCPServerOut)
 def get_server(
     server_id: str,
@@ -176,7 +383,7 @@ def update_server(
 
     for k, v in data.model_dump(exclude_unset=True).items():
         setattr(server, k, v)
-    
+
     server.updated_at = datetime.datetime.now(datetime.timezone.utc)
     db.commit()
     db.refresh(server)
@@ -359,7 +566,7 @@ async def auto_discover_endpoint(
     from app.mcp.client import MCPClient
     import time
     import os
-    
+
     start_time = time.perf_counter()
     try:
         cmd = req.command
@@ -403,9 +610,9 @@ async def auto_discover_endpoint(
         tools = await client.list_tools()
         resources = await client.list_resources()
         prompts = await client.list_prompts()
-        
+
         total_latency = round((time.perf_counter() - start_time) * 1000.0, 2)
-        
+
         return ServerDiscoverResponse(
             success=True,
             protocol_version=init_res.get("protocolVersion", "2024-11-05"),

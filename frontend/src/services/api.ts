@@ -110,6 +110,21 @@ export const api = {
   getIncidents: () => fetchJSON<any[]>('/servers/circuit-breaker/incidents'),
   resetCircuit: (serverId: string) =>
     fetchJSON<any>(`/servers/${serverId}/reset-circuit`, { method: 'POST' }),
+  getCanaryReadiness: () => fetchJSON<any>('/servers/canary/readiness'),
+  getOperationalTelemetry: () => fetchJSON<any>('/servers/operational/telemetry'),
+  getServerCanaryEligibility: (id: string) => fetchJSON<any>(`/servers/${id}/canary-eligibility`),
+  getServerDeploymentState: (id: string) => fetchJSON<any>(`/servers/${id}/deployment-state`),
+  transitionDeploymentState: (id: string, target_state: string, reason: string) =>
+    fetchJSON<any>(`/servers/${id}/deployment-state`, {
+      method: 'POST',
+      body: JSON.stringify({ target_state, reason }),
+    }),
+  rollbackServer: (id: string, reason: string) =>
+    fetchJSON<any>(`/servers/${id}/persistent/rollback?reason=${encodeURIComponent(reason)}`, {
+      method: 'POST',
+    }),
+  recoverServer: (id: string) =>
+    fetchJSON<any>(`/servers/${id}/persistent/recover`, { method: 'POST' }),
   discoverEndpoint: (data: {
     transport_type: string;
     command?: string;

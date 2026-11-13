@@ -31,6 +31,8 @@ Base.metadata.create_all(bind=engine)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Strict fail-closed enterprise startup validation (Task B2)
+    settings.validate_startup_configuration()
     await startup_seed()
     if getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False) and getattr(settings, "PERSISTENT_MCP_PREWARM_ON_STARTUP", False):
         try:
@@ -103,6 +105,7 @@ def health():
         persistent_status = "EMERGENCY_DISABLED" if PersistentSessionManager.is_emergency_disabled() else "ACTIVE"
     return {
         "status": "HEALTHY",
+        "environment": settings.ENVIRONMENT,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "database": "CONNECTED",
         "governance_engine": "ACTIVE",
@@ -146,7 +149,7 @@ async def startup_seed():
             return
 
         logger.info("Initializing enterprise seed data for MCP NEXUS...")
-        
+
         # 1. Organization
         org = Organization(
             name="Larsen & Toubro Heavy Civil & Digital IC",
@@ -207,7 +210,7 @@ async def startup_seed():
 
         # 3. Register the 3 Working MCP Demo Servers with absolute paths
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        
+
         erp_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "erp_server.py")
         inv_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "inventory_server.py")
         eqp_script = os.path.join(base_dir, "app", "mcp", "demo_servers", "equipment_server.py")

@@ -31,16 +31,26 @@ class MCPManager:
         1. Global setting ENABLE_PERSISTENT_MCP_SESSIONS == True
         2. Transport type == STDIO
         3. Emergency kill switch is NOT engaged
-        4. Server is in PERSISTENT_MCP_SERVERS allowlist (or '*' for all)
-        5. Not explicitly disabled in server.env_vars
+        4. Server is enabled
+        5. Deployment state is not DISABLED or ROLLBACK
+        6. Server is in PERSISTENT_MCP_SERVERS allowlist (wildcards forbidden in Staging/Production)
+        7. Not explicitly disabled in server.env_vars
         """
         if not getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False):
             return False
         if server.transport_type != "STDIO":
             return False
+        if not getattr(server, "is_enabled", True):
+            return False
 
         from app.mcp.persistent_session import PersistentSessionManager
         if PersistentSessionManager.is_emergency_disabled():
+            return False
+
+        # Check deployment governance state
+        from app.services.deployment_governance import DeploymentGovernanceService, DeploymentState
+        dep_state = DeploymentGovernanceService.get_server_state(server)
+        if dep_state in (DeploymentState.DISABLED, DeploymentState.ROLLBACK):
             return False
 
         # Check server environment variables override
@@ -51,11 +61,16 @@ class MCPManager:
             return True
 
         # Check rollout allowlist
-        allowed_servers = getattr(settings, "PERSISTENT_MCP_SERVERS", "*")
-        if allowed_servers == "*":
-            return True
+        allowed_servers = getattr(settings, "PERSISTENT_MCP_SERVERS", "")
         if not allowed_servers or not allowed_servers.strip() or allowed_servers.strip().lower() == "none":
             return False
+
+        current_env = getattr(settings, "ENVIRONMENT", "Development").capitalize()
+        if allowed_servers.strip() == "*":
+            # Wildcard is strictly forbidden in Staging and Production canary modes
+            if current_env in ("Staging", "Production"):
+                return False
+            return True
 
         items = [x.strip().lower() for x in allowed_servers.split(",") if x.strip()]
         identifier = (server.identifier or "").lower()
@@ -208,13 +223,17 @@ class MCPManager:
         tool: MCPTool,
         arguments: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], float, bool, Optional[str]]:
+        from app.services.observability_service import ObservabilityService
+
         # Circuit breaker check
         if MCPConnectionManager.is_circuit_open(server.id):
+            ObservabilityService.record_execution(0.0, success=False, is_fallback=False)
             return {}, 0.0, False, f"Circuit breaker OPEN for server '{server.name}' due to repeated failures. Automatic failover active."
 
         # Tenant Defense-in-Depth: Server organization identity validation (fail closed)
         if not server.organization_id or not str(server.organization_id).strip():
             logger.error(f"Tenant isolation failure: Server '{server.name}' has no organization_id configured.")
+            ObservabilityService.record_security_event("CROSS_TENANT_ACCESS")
             return {}, 0.0, False, f"Access denied: Server '{server.name}' has no authoritative organization_id configured."
 
         auth_org_id = str(server.organization_id).strip()
@@ -225,6 +244,7 @@ class MCPManager:
             org_exists = db.query(Organization).filter(Organization.id == auth_org_id).first()
             if not org_exists:
                 logger.error(f"Tenant isolation failure: Server '{server.name}' references invalid organization_id '{auth_org_id}'.")
+                ObservabilityService.record_security_event("CROSS_TENANT_ACCESS")
                 return {}, 0.0, False, f"Access denied: Server '{server.name}' has invalid organization_id '{auth_org_id}'."
 
         # Authoritative Tenant Binding: Never trust caller-supplied tenant arguments
@@ -248,6 +268,8 @@ class MCPManager:
         effective_env = dict(server.env_vars or {})
         effective_env["MCP_SERVER_ORGANIZATION_ID"] = auth_org_id
 
+        is_fallback = False
+
         if MCPManager.is_persistent_enabled(server):
             try:
                 from app.mcp.persistent_session import PersistentSessionManager
@@ -266,7 +288,8 @@ class MCPManager:
                     timeout=server.connection_timeout or 30.0
                 )
                 MCPConnectionManager.record_success(server.id)
-                
+                ObservabilityService.record_execution(duration_ms, success=True, is_fallback=False)
+
                 # Update metrics
                 tool.total_executions += 1
                 tool.last_executed_at = datetime.datetime.now(datetime.timezone.utc)
@@ -278,12 +301,14 @@ class MCPManager:
             except Exception as e:
                 logger.warning(f"Persistent session execution failed for '{server.name}' tool '{tool.name}': {e}")
                 if getattr(settings, "PERSISTENT_MCP_FALLBACK_TO_LEGACY", True):
+                    is_fallback = True
                     MCPManager._fallback_counts[server.id] = MCPManager._fallback_counts.get(server.id, 0) + 1
                     logger.info(f"Safely falling back to legacy transport for '{server.name}' tool '{tool.name}' (fallback_count={MCPManager._fallback_counts[server.id]})...")
                 else:
                     tool.failed_executions += 1
                     server.error_rate = round(min(1.0, server.error_rate + 0.05), 3)
                     tripped = MCPConnectionManager.record_failure(server.id, server.name)
+                    ObservabilityService.record_execution(0.0, success=False, is_fallback=False)
                     db.commit()
                     msg = f"Tool execution error: {str(e)}"
                     if tripped:
@@ -297,7 +322,8 @@ class MCPManager:
             try:
                 res, duration_ms = await client.call_tool(tool.name, effective_args)
                 MCPConnectionManager.record_success(server.id)
-                
+                ObservabilityService.record_execution(duration_ms, success=True, is_fallback=is_fallback)
+
                 # Update metrics
                 tool.total_executions += 1
                 tool.last_executed_at = datetime.datetime.now(datetime.timezone.utc)
@@ -310,6 +336,7 @@ class MCPManager:
                 tool.failed_executions += 1
                 server.error_rate = round(min(1.0, server.error_rate + 0.05), 3)
                 tripped = MCPConnectionManager.record_failure(server.id, server.name)
+                ObservabilityService.record_execution(0.0, success=False, is_fallback=is_fallback)
                 db.commit()
                 msg = f"Tool execution error: {str(e)}"
                 if tripped:

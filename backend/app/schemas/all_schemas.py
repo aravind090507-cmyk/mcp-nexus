@@ -308,3 +308,25 @@ class TraceDetailOut(TraceOut):
     output_response: Dict[str, Any]
     error_details: Optional[str] = None
     spans: List[Dict[str, Any]] = []
+
+# --- DEPLOYMENT GOVERNANCE & CANARY READINESS ---
+class DeploymentTransitionRequest(BaseModel):
+    target_state: str
+    reason: str
+
+class DeploymentStateOut(BaseModel):
+    server_id: str
+    server_name: str
+    deployment_state: str
+    history: List[Dict[str, Any]] = []
+
+class CanaryEligibilityOut(BaseModel):
+    is_eligible: bool
+    reason: str
+    server_id: str
+    server_name: str
+    environment: str
+    evaluated_at: str
+    deployment_state: str
+    policy_allowed: bool
+    details: Dict[str, Any] = {}

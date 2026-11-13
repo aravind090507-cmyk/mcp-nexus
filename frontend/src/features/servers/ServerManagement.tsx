@@ -126,6 +126,44 @@ export const ServerManagement: React.FC = () => {
     onError: (err: any) => alert(`Update Failed: ${err.message}`),
   });
 
+  // Rollback mutation
+  const rollbackMutation = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => api.rollbackServer(id, reason),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['mcp-servers'] });
+      alert(data.message);
+    },
+    onError: (err: any) => alert(`Rollback Failed: ${err.message}`),
+  });
+
+  // Recover mutation
+  const recoverMutation = useMutation({
+    mutationFn: (id: string) => api.recoverServer(id),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['mcp-servers'] });
+      alert(data.message);
+    },
+    onError: (err: any) => alert(`Recovery Failed: ${err.message}`),
+  });
+
+  const getDeploymentStateBadge = (state?: string) => {
+    const s = state || 'DISABLED';
+    switch (s) {
+      case 'PREPARED':
+        return 'bg-[#48B9D0]/15 text-[#48B9D0] border border-[#48B9D0]/30';
+      case 'ELIGIBLE':
+        return 'bg-[#9B51E0]/15 text-[#9B51E0] border border-[#9B51E0]/30';
+      case 'CANARY_AUTHORIZED':
+        return 'bg-[#F0A43A]/15 text-[#F0A43A] border border-[#F0A43A]/30';
+      case 'CANARY_ACTIVE':
+        return 'bg-[#43B581]/15 text-[#43B581] border border-[#43B581]/30';
+      case 'ROLLBACK':
+        return 'bg-[#E05252]/15 text-[#E05252] border border-[#E05252]/30';
+      default:
+        return 'bg-[#303640]/40 text-[#9DA7B5] border border-[#303640]';
+    }
+  };
+
   const handleOpenEdit = (server: MCPServer) => {
     setEditFormData({
       id: server.id,
@@ -362,6 +400,9 @@ export const ServerManagement: React.FC = () => {
                           }`}>
                             {server.status}
                           </span>
+                          <span className={`text-[9px] px-1.5 py-0.2 rounded font-bold ${getDeploymentStateBadge(server.env_vars?.DEPLOYMENT_STATE)}`}>
+                            {server.env_vars?.DEPLOYMENT_STATE || 'DISABLED'}
+                          </span>
                         </div>
                         <div className="text-[10px] text-[#9DA7B5] font-mono mt-0.5">
                           ID: {server.identifier} • {server.transport_type}
@@ -457,6 +498,44 @@ export const ServerManagement: React.FC = () => {
                 <div className="p-2 bg-[#181C23] border border-[#303640] rounded">
                   <div className="text-[10px] text-[#626D7C]">ERROR RATE</div>
                   <div className="text-[#ECEFF4] font-bold mt-0.5">{activeSelected.error_rate}%</div>
+                </div>
+              </div>
+
+              {/* Deployment Governance & Canary Status */}
+              <div className="p-2.5 bg-[#181C23] border border-[#303640] rounded text-xs flex items-center justify-between">
+                <div>
+                  <div className="text-[10px] text-[#626D7C]">DEPLOYMENT STATE</div>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${getDeploymentStateBadge(activeSelected.env_vars?.DEPLOYMENT_STATE)}`}>
+                      {activeSelected.env_vars?.DEPLOYMENT_STATE || 'DISABLED'}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {activeSelected.env_vars?.DEPLOYMENT_STATE === 'ROLLBACK' ? (
+                    <button
+                      onClick={() => recoverMutation.mutate(activeSelected.id)}
+                      disabled={recoverMutation.isPending}
+                      className="px-2 py-1 bg-[#43B581]/15 hover:bg-[#43B581]/30 border border-[#43B581]/40 rounded text-[11px] text-[#43B581] font-bold"
+                      title="Verify health and recover to PREPARED state"
+                    >
+                      Recover Server
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        const reason = prompt(`Enter reason for rolling back '${activeSelected.name}' to legacy transport:`, 'Manual operator rollback');
+                        if (reason) {
+                          rollbackMutation.mutate({ id: activeSelected.id, reason });
+                        }
+                      }}
+                      disabled={rollbackMutation.isPending}
+                      className="px-2 py-1 bg-[#E05252]/15 hover:bg-[#E05252]/30 border border-[#E05252]/40 rounded text-[11px] text-[#E05252] font-bold"
+                      title="Trigger server rollback to legacy transport"
+                    >
+                      Rollback Server
+                    </button>
+                  )}
                 </div>
               </div>
 

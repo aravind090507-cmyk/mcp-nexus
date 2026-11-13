@@ -40,6 +40,7 @@ export interface MCPServer {
   avg_response_time_ms: number;
   error_rate: number;
   total_calls: number;
+  env_vars?: Record<string, any>;
   tools: MCPTool[];
 }
 
