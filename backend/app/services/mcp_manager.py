@@ -53,14 +53,7 @@ class MCPManager:
         if dep_state in (DeploymentState.DISABLED, DeploymentState.ROLLBACK):
             return False
 
-        # Check server environment variables override
-        env_vars = server.env_vars or {}
-        if str(env_vars.get("ENABLE_PERSISTENT_SESSION", "")).lower() in ("false", "0", "no"):
-            return False
-        if str(env_vars.get("ENABLE_PERSISTENT_SESSION", "")).lower() in ("true", "1", "yes"):
-            return True
-
-        # Check rollout allowlist
+        # Check rollout allowlist (Mandatory central governance)
         allowed_servers = getattr(settings, "PERSISTENT_MCP_SERVERS", "")
         if not allowed_servers or not allowed_servers.strip() or allowed_servers.strip().lower() == "none":
             return False
@@ -70,14 +63,25 @@ class MCPManager:
             # Wildcard is strictly forbidden in Staging and Production canary modes
             if current_env in ("Staging", "Production"):
                 return False
-            return True
+            is_allowlisted = True
+        else:
+            items = [x.strip().lower() for x in allowed_servers.split(",") if x.strip()]
+            identifier = (server.identifier or "").lower()
+            server_id = (server.id or "").lower()
+            server_name = (server.name or "").lower()
+            is_allowlisted = any(item in (identifier, server_id, server_name) for item in items)
 
-        items = [x.strip().lower() for x in allowed_servers.split(",") if x.strip()]
-        identifier = (server.identifier or "").lower()
-        server_id = (server.id or "").lower()
-        server_name = (server.name or "").lower()
+        if not is_allowlisted:
+            return False
 
-        return any(item in (identifier, server_id, server_name) for item in items)
+        # Server-level environment variables check:
+        # A server may OPT OUT locally by setting ENABLE_PERSISTENT_SESSION to false,
+        # but CANNOT bypass the central allowlist.
+        env_vars = server.env_vars or {}
+        if str(env_vars.get("ENABLE_PERSISTENT_SESSION", "")).lower() in ("false", "0", "no"):
+            return False
+
+        return True
 
     @staticmethod
     def get_client_for_server(server: MCPServer) -> MCPClient:

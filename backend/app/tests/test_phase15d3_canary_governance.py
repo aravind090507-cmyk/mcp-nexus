@@ -447,27 +447,30 @@ def test_observability_security_event_counters():
 # ==============================================================================
 
 def test_canary_readiness_thresholds_evaluation():
-    """Readiness evaluation reports PASS/FAIL/NOT_MEASURED across all 10 criteria."""
-    # When no canary traffic is active:
+    """Readiness evaluation reports PASS/FAIL/INSUFFICIENT_DATA/NOT_MEASURED across all 10 criteria."""
+    # When no canary traffic is active and observations == 0, status must be INSUFFICIENT_DATA (DEFECT-15D3-03 fix)
     eval_report = CanaryGovernanceService.evaluate_readiness_thresholds()
-    assert eval_report["overall_status"] == "READY_FOR_CANARY"
+    assert eval_report["overall_status"] == "INSUFFICIENT_DATA"
     assert eval_report["canary_traffic_active"] is False
+    assert eval_report["sample_size"] == 0
+    assert eval_report["required_sample_size"] == 50
 
     criteria = eval_report["criteria"]
-    assert criteria["execution_success_rate"]["status"] == "NOT_MEASURED"
-    assert criteria["p95_latency"]["status"] == "NOT_MEASURED"
-    assert criteria["p99_latency"]["status"] == "NOT_MEASURED"
+    assert criteria["execution_success_rate"]["status"] == "INSUFFICIENT_DATA"
+    assert criteria["p95_latency"]["status"] == "INSUFFICIENT_DATA"
+    assert criteria["p99_latency"]["status"] == "INSUFFICIENT_DATA"
     assert criteria["session_initialization_failures"]["status"] == "PASS"
     assert criteria["heartbeat_failures"]["status"] == "PASS"
     assert criteria["orphan_subprocesses"]["status"] == "PASS"
     assert criteria["unauthorized_activations"]["status"] == "PASS"
     assert criteria["cross_tenant_access"]["status"] == "PASS"
 
-    # Simulated violation
+    # Simulated violation: even with insufficient observations, explicit failures trigger FAIL
     failing_report = CanaryGovernanceService.evaluate_readiness_thresholds({
+        "total_observations": 10,
         "success_rate_pct": 85.0,  # Below threshold 99%
         "unauthorized_activations": 2
     })
     assert failing_report["overall_status"] == "FAIL"
-    assert failing_report["criteria"]["execution_success_rate"]["status"] == "FAIL"
+    assert failing_report["criteria"]["execution_success_rate"]["status"] == "INSUFFICIENT_DATA"
     assert failing_report["criteria"]["unauthorized_activations"]["status"] == "FAIL"

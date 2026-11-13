@@ -204,10 +204,16 @@ class CanaryGovernanceService:
         )
 
     @classmethod
-    def evaluate_readiness_thresholds(cls, observed_metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def evaluate_readiness_thresholds(
+        cls,
+        observed_metrics: Optional[Dict[str, Any]] = None,
+        min_observations: Optional[int] = None
+    ) -> Dict[str, Any]:
         """
         Evaluates operational performance and reliability against configurable enterprise
-        acceptance criteria (Task H). Reports PASS, FAIL, or NOT_MEASURED.
+        acceptance criteria (Task H and Phase 15D.3.2).
+        Reports PASS, FAIL, INSUFFICIENT_DATA, or NOT_MEASURED.
+        Strict rule: Missing or insufficient observations CANNOT evaluate to READY_FOR_CANARY.
         """
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         obs = observed_metrics or {}
@@ -221,52 +227,91 @@ class CanaryGovernanceService:
         max_mem_growth = getattr(settings, "CANARY_MAX_MEMORY_GROWTH_MB", 50.0)
         target_rollback_ms = getattr(settings, "CANARY_ROLLBACK_TARGET_MS", 2000.0)
 
+        required_observations = min_observations if min_observations is not None else getattr(settings, "CANARY_MIN_OBSERVATIONS", 50)
+        total_observations = int(obs.get("total_observations", obs.get("total_executions", 0)))
+
         # Check observed metrics
         criteria = {}
 
-        # 1. Success rate
-        if "success_rate_pct" in obs:
+        # 1. Success rate (Requires minimum observations)
+        if total_observations < required_observations:
+            criteria["execution_success_rate"] = {
+                "threshold": f">= {min_success_rate}%",
+                "measured": f"{obs.get('success_rate_pct', 'None')}% (sample: {total_observations}/{required_observations})" if "success_rate_pct" in obs else f"None (sample: {total_observations}/{required_observations})",
+                "status": "INSUFFICIENT_DATA",
+                "observations": total_observations,
+                "required_observations": required_observations
+            }
+        elif "success_rate_pct" in obs and obs["success_rate_pct"] is not None:
             val = float(obs["success_rate_pct"])
             criteria["execution_success_rate"] = {
                 "threshold": f">= {min_success_rate}%",
-                "measured": f"{val}%",
-                "status": "PASS" if val >= min_success_rate else "FAIL"
+                "measured": f"{val}% (sample: {total_observations})",
+                "status": "PASS" if val >= min_success_rate else "FAIL",
+                "observations": total_observations,
+                "required_observations": required_observations
             }
         else:
             criteria["execution_success_rate"] = {
                 "threshold": f">= {min_success_rate}%",
                 "measured": "None (No canary traffic active)",
-                "status": "NOT_MEASURED"
+                "status": "NOT_MEASURED",
+                "observations": total_observations,
+                "required_observations": required_observations
             }
 
-        # 2. P95 latency
-        if "p95_latency_ms" in obs:
+        # 2. P95 latency (Requires minimum observations)
+        if total_observations < required_observations:
+            criteria["p95_latency"] = {
+                "threshold": f"<= {max_p95_latency}ms",
+                "measured": f"{obs.get('p95_latency_ms', 'None')}ms (sample: {total_observations}/{required_observations})" if "p95_latency_ms" in obs else f"None (sample: {total_observations}/{required_observations})",
+                "status": "INSUFFICIENT_DATA",
+                "observations": total_observations,
+                "required_observations": required_observations
+            }
+        elif "p95_latency_ms" in obs and obs["p95_latency_ms"] is not None:
             val = float(obs["p95_latency_ms"])
             criteria["p95_latency"] = {
                 "threshold": f"<= {max_p95_latency}ms",
-                "measured": f"{val}ms",
-                "status": "PASS" if val <= max_p95_latency else "FAIL"
+                "measured": f"{val}ms (sample: {total_observations})",
+                "status": "PASS" if val <= max_p95_latency else "FAIL",
+                "observations": total_observations,
+                "required_observations": required_observations
             }
         else:
             criteria["p95_latency"] = {
                 "threshold": f"<= {max_p95_latency}ms",
                 "measured": "None",
-                "status": "NOT_MEASURED"
+                "status": "NOT_MEASURED",
+                "observations": total_observations,
+                "required_observations": required_observations
             }
 
-        # 3. P99 latency
-        if "p99_latency_ms" in obs:
+        # 3. P99 latency (Requires minimum observations)
+        if total_observations < required_observations:
+            criteria["p99_latency"] = {
+                "threshold": f"<= {max_p99_latency}ms",
+                "measured": f"{obs.get('p99_latency_ms', 'None')}ms (sample: {total_observations}/{required_observations})" if "p99_latency_ms" in obs else f"None (sample: {total_observations}/{required_observations})",
+                "status": "INSUFFICIENT_DATA",
+                "observations": total_observations,
+                "required_observations": required_observations
+            }
+        elif "p99_latency_ms" in obs and obs["p99_latency_ms"] is not None:
             val = float(obs["p99_latency_ms"])
             criteria["p99_latency"] = {
                 "threshold": f"<= {max_p99_latency}ms",
-                "measured": f"{val}ms",
-                "status": "PASS" if val <= max_p99_latency else "FAIL"
+                "measured": f"{val}ms (sample: {total_observations})",
+                "status": "PASS" if val <= max_p99_latency else "FAIL",
+                "observations": total_observations,
+                "required_observations": required_observations
             }
         else:
             criteria["p99_latency"] = {
                 "threshold": f"<= {max_p99_latency}ms",
                 "measured": "None",
-                "status": "NOT_MEASURED"
+                "status": "NOT_MEASURED",
+                "observations": total_observations,
+                "required_observations": required_observations
             }
 
         # 4. Session init failures
@@ -332,15 +377,40 @@ class CanaryGovernanceService:
                 "status": "NOT_MEASURED"
             }
 
-        # Overall Readiness Verdict
-        all_non_measured_or_pass = all(c["status"] in ("PASS", "NOT_MEASURED") for c in criteria.values())
+        # Overall Readiness Verdict Determination:
+        # - Any FAIL -> "FAIL"
+        # - Any INSUFFICIENT_DATA -> "INSUFFICIENT_DATA"
+        # - All operational criteria are PASS and remainder NOT_MEASURED -> "READY_FOR_CANARY"
+        # - Otherwise -> "NOT_READY"
         any_fail = any(c["status"] == "FAIL" for c in criteria.values())
+        any_insufficient = any(c["status"] == "INSUFFICIENT_DATA" for c in criteria.values())
 
-        overall_verdict = "FAIL" if any_fail else ("READY_FOR_CANARY" if all_non_measured_or_pass else "NOT_READY")
+        # Operational criteria requiring pass: success_rate, p95, p99, init_fails, hb_fails, orphans, unauth, cross_tenant
+        all_passed = (
+            criteria["execution_success_rate"]["status"] == "PASS" and
+            criteria["p95_latency"]["status"] == "PASS" and
+            criteria["p99_latency"]["status"] == "PASS" and
+            criteria["session_initialization_failures"]["status"] == "PASS" and
+            criteria["heartbeat_failures"]["status"] == "PASS" and
+            criteria["orphan_subprocesses"]["status"] == "PASS" and
+            criteria["unauthorized_activations"]["status"] == "PASS" and
+            criteria["cross_tenant_access"]["status"] == "PASS"
+        )
+
+        if any_fail:
+            overall_verdict = "FAIL"
+        elif any_insufficient:
+            overall_verdict = "INSUFFICIENT_DATA"
+        elif all_passed:
+            overall_verdict = "READY_FOR_CANARY"
+        else:
+            overall_verdict = "NOT_READY"
 
         return {
             "overall_status": overall_verdict,
             "canary_traffic_active": False,
             "evaluated_at": now_iso,
+            "sample_size": total_observations,
+            "required_sample_size": required_observations,
             "criteria": criteria
         }

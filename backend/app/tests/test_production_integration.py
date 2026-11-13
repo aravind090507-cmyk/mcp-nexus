@@ -113,10 +113,12 @@ def test_03_per_server_rollout_controls():
         assert MCPManager.is_persistent_enabled(inv) is False
         assert MCPManager.is_persistent_enabled(eqp) is True
 
-        # Step C: Per-server explicit override in env_vars
+        # Step C: Per-server explicit opt-out in env_vars (allowlisted server can opt out, but unallowlisted cannot bypass)
         inv.env_vars = {"ENABLE_PERSISTENT_SESSION": "true"}
-        assert MCPManager.is_persistent_enabled(inv) is True
+        # Unallowlisted server 'inv' cannot bypass the allowlist via env_vars
+        assert MCPManager.is_persistent_enabled(inv) is False
 
+        # Allowlisted server 'erp' can opt out via env_vars
         erp.env_vars = {"ENABLE_PERSISTENT_SESSION": "false"}
         assert MCPManager.is_persistent_enabled(erp) is False
 

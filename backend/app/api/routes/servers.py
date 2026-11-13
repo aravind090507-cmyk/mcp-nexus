@@ -170,6 +170,7 @@ def get_canary_readiness_report(
     security_metrics = telemetry.get("security_metrics", {})
 
     observed = {
+        "total_observations": exec_metrics.get("total_executions", 0),
         "success_rate_pct": exec_metrics.get("success_rate_pct"),
         "p95_latency_ms": exec_metrics.get("latency", {}).get("p95_ms"),
         "p99_latency_ms": exec_metrics.get("latency", {}).get("p99_ms"),

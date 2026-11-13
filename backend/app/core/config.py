@@ -157,6 +157,7 @@ class Settings(BaseSettings):
     CANARY_MAX_HEARTBEAT_FAILURES: int = int(os.getenv("CANARY_MAX_HEARTBEAT_FAILURES", "0"))
     CANARY_MAX_MEMORY_GROWTH_MB: float = float(os.getenv("CANARY_MAX_MEMORY_GROWTH_MB", "50.0"))
     CANARY_ROLLBACK_TARGET_MS: float = float(os.getenv("CANARY_ROLLBACK_TARGET_MS", "2000.0"))
+    CANARY_MIN_OBSERVATIONS: int = int(os.getenv("CANARY_MIN_OBSERVATIONS", "50"))
 
     model_config = SettingsConfigDict(case_sensitive=True, extra="ignore")
 
