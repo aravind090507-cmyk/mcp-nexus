@@ -1,0 +1,98 @@
+{
+  "activation_timestamp_utc": "2026-11-13T04:25:16.027585+00:00",
+  "staging_environment": {
+    "profile": "Staging Isolated",
+    "database_url": "sqlite:///./mcp_nexus.db",
+    "target_server": "mcp-srv-erp-core",
+    "global_flag_enabled": true,
+    "canary_allowlist": "mcp-srv-erp-core",
+    "fallback_enabled": true
+  },
+  "security_gates": {
+    "cross_tenant_isolation": "PASSED (Strictly Blocked)",
+    "financial_summary_authorization": "PASSED (RBAC Enforced)",
+    "credential_isolation": "PASSED (Staging Isolated)"
+  },
+  "canary_workload": {
+    "total_requests": 290,
+    "successful_requests": 290,
+    "failed_requests": 0,
+    "success_rate_pct": 100.0,
+    "avg_latency_ms": 61.08,
+    "p50_latency_ms": 38.43,
+    "p95_latency_ms": 201.29,
+    "p99_latency_ms": 240.23,
+    "concurrency_breakdown": {
+      "C_1": {
+        "requests": 10,
+        "successes": 10,
+        "avg_latency_ms": 1.36,
+        "p50_latency_ms": 1.34,
+        "p95_latency_ms": 1.63,
+        "p99_latency_ms": 1.63,
+        "throughput_req_s": 93.9
+      },
+      "C_5": {
+        "requests": 50,
+        "successes": 50,
+        "avg_latency_ms": 20.83,
+        "p50_latency_ms": 20.87,
+        "p95_latency_ms": 44.0,
+        "p99_latency_ms": 47.01,
+        "throughput_req_s": 93.3
+      },
+      "C_10": {
+        "requests": 100,
+        "successes": 100,
+        "avg_latency_ms": 44.34,
+        "p50_latency_ms": 43.36,
+        "p95_latency_ms": 87.89,
+        "p99_latency_ms": 97.43,
+        "throughput_req_s": 98.8
+      },
+      "C_25": {
+        "requests": 100,
+        "successes": 100,
+        "avg_latency_ms": 121.75,
+        "p50_latency_ms": 122.97,
+        "p95_latency_ms": 231.47,
+        "p99_latency_ms": 252.67,
+        "throughput_req_s": 97.9
+      }
+    }
+  },
+  "legacy_baseline": {
+    "sample_requests": 10,
+    "avg_latency_ms": 321.69,
+    "p50_latency_ms": 326.96,
+    "canary_speedup_factor": "5.3x faster (321.7ms -> 61.08ms)"
+  },
+  "chaos_and_recovery": {
+    "killed_pid": 26292,
+    "recovery_call_success": true,
+    "recovered_state": "WARM",
+    "new_pid": 29632,
+    "pid_cycled_cleanly": true
+  },
+  "rollback_validation": {
+    "emergency_disable_duration_ms": 36.81,
+    "emergency_disabled": true,
+    "persistent_subprocess_alive": false,
+    "post_rollback_legacy_call_ok": true,
+    "post_rollback_latency_ms": 351.17,
+    "authorization_preserved": true
+  },
+  "live_telemetry": {
+    "server_id": "6a2b66c3-d002-4213-96a7-287df8f8ab93",
+    "server_name": "ERP MCP Server",
+    "session_state": "WARM",
+    "subprocess_pid": 26292,
+    "host_rss_mb": 105.84,
+    "subprocess_rss_mb": 16.79,
+    "handles": 73,
+    "pending_requests": 0,
+    "total_requests_served": 290,
+    "consecutive_failures": 0,
+    "legacy_fallback_counts": {}
+  }
+}
