@@ -42,8 +42,10 @@ class MCPManager:
 
         # Check rollout allowlist
         allowed_servers = getattr(settings, "PERSISTENT_MCP_SERVERS", "*")
-        if allowed_servers == "*" or not allowed_servers.strip():
+        if allowed_servers == "*":
             return True
+        if not allowed_servers or not allowed_servers.strip() or allowed_servers.strip().lower() == "none":
+            return False
 
         items = [x.strip().lower() for x in allowed_servers.split(",") if x.strip()]
         identifier = (server.identifier or "").lower()

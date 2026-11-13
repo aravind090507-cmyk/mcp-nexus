@@ -88,6 +88,15 @@ class PolicyEngine:
             )
             return PolicyDecision.BLOCKED, f"Server '{server.name}' is currently disabled by administrator.", "LOW"
 
+        # 1b. Tenant Isolation Boundary Enforcement
+        if user.organization_id and server.organization_id and user.organization_id != server.organization_id:
+            if user.role != RoleEnum.SUPER_ADMIN.value:
+                PolicyEngine._log_security_event(
+                    db, "CROSS_TENANT_ACCESS_DENIED", "CRITICAL", user.email, server.name,
+                    f"Cross-tenant violation: User '{user.email}' (Tenant: {user.organization_id}) attempted to access Server '{server.name}' (Tenant: {server.organization_id})"
+                )
+                return PolicyDecision.BLOCKED, f"Access denied: Cross-tenant access forbidden. Server '{server.name}' belongs to a different organization.", "HIGH"
+
         # 2. Tool must be enabled
         if not tool.is_enabled:
             PolicyEngine._log_security_event(

@@ -25,23 +25,35 @@ from app.core.config import settings
 
 logger = logging.getLogger("mcp-nexus.persistent-session")
 
-def sanitize_log_data(data: Any, max_len: int = 256) -> Any:
-    """Recursively redacts sensitive keys such as passwords, tokens, API keys, and authorization headers."""
-    SENSITIVE_KEYS = {"password", "secret", "token", "auth_token", "api_key", "authorization", "access_token"}
+def sanitize_log_data(data: Any, max_len: int = 512) -> Any:
+    """Recursively redacts sensitive keys such as passwords, tokens, API keys, credentials, and authorization headers."""
+    import re
+    SENSITIVE_KEYS = {
+        "password", "passwd", "secret", "token", "auth_token", "api_key", 
+        "apikey", "authorization", "access_token", "refresh_token", 
+        "private_key", "credential", "client_secret"
+    }
     if isinstance(data, dict):
         return {
-            k: ("[REDACTED]" if any(s in k.lower() for s in SENSITIVE_KEYS) else sanitize_log_data(v, max_len))
+            k: ("[REDACTED]" if any(s in str(k).lower() for s in SENSITIVE_KEYS) else sanitize_log_data(v, max_len))
             for k, v in data.items()
         }
-    elif isinstance(data, list):
+    elif isinstance(data, (list, tuple, set)):
         return [sanitize_log_data(item, max_len) for item in data]
+    elif isinstance(data, BaseException):
+        return sanitize_log_data(str(data), max_len)
     elif isinstance(data, str):
-        # Redact raw Bearer tokens if present in strings
+        # Scrub Bearer tokens
         if "bearer " in data.lower():
-            import re
             data = re.sub(r'(bearer\s+)[A-Za-z0-9_\-\.]+', r'\1[REDACTED]', data, flags=re.IGNORECASE)
+        # Scrub inline key=value credentials
+        data = re.sub(r'(api[_-]?key[\s:=]+)[A-Za-z0-9_\-\.]+', r'\1[REDACTED]', data, flags=re.IGNORECASE)
+        data = re.sub(r'(password[\s:=]+)[^\s,;&"\']+', r'\1[REDACTED]', data, flags=re.IGNORECASE)
+        data = re.sub(r'(secret[\s:=]+)[^\s,;&"\']+', r'\1[REDACTED]', data, flags=re.IGNORECASE)
+        data = re.sub(r'(token[\s:=]+)[A-Za-z0-9_\-\.]+', r'\1[REDACTED]', data, flags=re.IGNORECASE)
         if len(data) > max_len:
             return data[:max_len] + "... [truncated]"
+        return data
     return data
 
 
