@@ -13,6 +13,16 @@ import logging
 logger = logging.getLogger(__name__)
 
 class MCPManager:
+    _fallback_counts: Dict[str, int] = {}
+
+    @classmethod
+    def get_fallback_counts(cls) -> Dict[str, int]:
+        return dict(cls._fallback_counts)
+
+    @classmethod
+    def reset_fallback_counts(cls):
+        cls._fallback_counts.clear()
+
     @staticmethod
     def is_persistent_enabled(server: MCPServer) -> bool:
         """
@@ -232,7 +242,8 @@ class MCPManager:
             except Exception as e:
                 logger.warning(f"Persistent session execution failed for '{server.name}' tool '{tool.name}': {e}")
                 if getattr(settings, "PERSISTENT_MCP_FALLBACK_TO_LEGACY", True):
-                    logger.info(f"Safely falling back to legacy transport for '{server.name}' tool '{tool.name}'...")
+                    MCPManager._fallback_counts[server.id] = MCPManager._fallback_counts.get(server.id, 0) + 1
+                    logger.info(f"Safely falling back to legacy transport for '{server.name}' tool '{tool.name}' (fallback_count={MCPManager._fallback_counts[server.id]})...")
                 else:
                     tool.failed_executions += 1
                     server.error_rate = round(min(1.0, server.error_rate + 0.05), 3)

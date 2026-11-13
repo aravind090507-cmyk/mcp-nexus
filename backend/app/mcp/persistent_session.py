@@ -601,6 +601,13 @@ class PersistentSessionManager:
         total_rss = round(sum(m["memory_rss_mb"] for m in session_metrics), 2)
         total_handles = sum(m["handles"] for m in session_metrics)
 
+        fallback_counts = {}
+        try:
+            from app.services.mcp_manager import MCPManager
+            fallback_counts = MCPManager.get_fallback_counts()
+        except Exception:
+            pass
+
         return {
             "global_flag_enabled": getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False),
             "emergency_disabled": cls._emergency_disabled,
@@ -611,6 +618,7 @@ class PersistentSessionManager:
             "total_pending_requests": total_pending,
             "total_subprocess_rss_mb": total_rss,
             "total_handles": total_handles,
+            "legacy_fallback_counts": fallback_counts,
             "sessions": session_metrics
         }
 
