@@ -91,6 +91,59 @@ class ManagedEngineContext:
             return self._disposed
 
 
+class _LeaseReleaser:
+    """
+    Safely releases an operation lease on a ManagedEngineContext.
+    Maintains zero references to the Session or Connection object,
+    preventing reference cycles in weakref.finalize (DEFECT-15D27-01).
+    """
+    def __init__(self, ctx: ManagedEngineContext):
+        self.ctx = ctx
+        self.released = False
+        self.lock = threading.Lock()
+
+    def __call__(self):
+        with self.lock:
+            if not self.released:
+                self.released = True
+                self.ctx.release_lease()
+
+
+class _EngineEventRegistry:
+    """
+    Authoritative registry of user-registered SQLAlchemy engine event listeners.
+    Preserves original function references so that listeners can be cleanly replayed
+    and reliably removed across engine rebinding transitions (DEFECT-15D27-02).
+    """
+    def __init__(self):
+        self._listeners: dict = {}
+        self._lock = threading.Lock()
+
+    def register(self, identifier: str, fn: Callable, *args, **kwargs):
+        fn_key = (id(fn.__func__), id(fn.__self__)) if hasattr(fn, '__func__') else id(fn)
+        with self._lock:
+            self._listeners[(identifier, fn_key)] = (identifier, fn, args, kwargs)
+
+    def unregister(self, identifier: str, fn: Callable):
+        fn_key = (id(fn.__func__), id(fn.__self__)) if hasattr(fn, '__func__') else id(fn)
+        with self._lock:
+            self._listeners.pop((identifier, fn_key), None)
+
+    def replay_on_engine(self, target_engine):
+        with self._lock:
+            items = list(self._listeners.values())
+        if items:
+            target_engine._has_events = True
+        for identifier, fn, args, kwargs in items:
+            try:
+                event.listen(target_engine, identifier, fn, *args, **kwargs)
+            except Exception:
+                pass
+
+
+_engine_event_registry = _EngineEventRegistry()
+
+
 def _create_engine_and_session(db_url: str):
     connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
     eng = create_engine(
@@ -98,6 +151,15 @@ def _create_engine_and_session(db_url: str):
         connect_args=connect_args,
         echo=False
     )
+    # Intercept dispatch._listen to record user-registered original callbacks
+    orig_listen = eng.dispatch._listen
+
+    def _tracking_listen(event_key, *args, **kwargs):
+        _engine_event_registry.register(event_key.identifier, event_key.fn, *args, **kwargs)
+        return orig_listen(event_key, *args, **kwargs)
+
+    eng.dispatch._listen = _tracking_listen
+
     sess_factory = sessionmaker(autocommit=False, autoflush=False, bind=eng)
     return eng, sess_factory
 
@@ -134,23 +196,19 @@ class _EngineProxy:
                 ctx.release_lease()
                 raise
 
-        # Attach lease release to connection closure and GC finalization
-        _released = False
-        _lock = threading.Lock()
+        # Decoupled lease releaser prevents reference cycles with weakref.finalize (DEFECT-15D27-01)
+        releaser = _LeaseReleaser(ctx)
+        fin = weakref.finalize(conn, releaser)
+
         orig_close = conn.close
 
         def _safe_close():
-            nonlocal _released
-            with _lock:
-                if not _released:
-                    _released = True
-                    try:
-                        orig_close()
-                    finally:
-                        ctx.release_lease()
+            try:
+                orig_close()
+            finally:
+                fin()
 
         conn.close = _safe_close
-        weakref.finalize(conn, _safe_close)
         return conn
 
     @contextmanager
@@ -171,6 +229,20 @@ class _EngineProxy:
         """Disposes the active engine."""
         with _state_lock:
             _current_context.engine.dispose()
+
+    def remove_listener(self, identifier: str, fn: Callable):
+        """Explicitly unregisters a listener from both the active engine and the registry (DEFECT-15D27-02)."""
+        _engine_event_registry.unregister(identifier, fn)
+        with _state_lock:
+            active_eng = _current_context.engine
+        try:
+            event.remove(self, identifier, fn)
+        except Exception:
+            pass
+        try:
+            event.remove(active_eng, identifier, fn)
+        except Exception:
+            pass
 
     @property
     def url(self):
@@ -243,22 +315,19 @@ class _SessionLocalProxy:
             ctx.release_lease()
             raise
 
-        _released = False
-        _lock = threading.Lock()
+        # Decoupled lease releaser prevents reference cycles with weakref.finalize (DEFECT-15D27-01)
+        releaser = _LeaseReleaser(ctx)
+        fin = weakref.finalize(session, releaser)
+
         orig_close = session.close
 
         def _safe_close():
-            nonlocal _released
-            with _lock:
-                if not _released:
-                    _released = True
-                    try:
-                        orig_close()
-                    finally:
-                        ctx.release_lease()
+            try:
+                orig_close()
+            finally:
+                fin()
 
         session.close = _safe_close
-        weakref.finalize(session, _safe_close)
         return session
 
     def __getattr__(self, name):
@@ -280,7 +349,7 @@ def reset_database_engine(new_db_url: Optional[str] = None):
     - Atomically creates and validates the new engine before retiring the old engine.
     - If engine creation fails, the active engine is preserved completely untouched.
     - Previous engine is retired and only disposed once all active leases have completed.
-    - Event listeners from the active engine are transferred to the rebound engine.
+    - Authoritative event listeners are replayed on the rebound engine using original functions.
     - Thread-safe and deadlock-free.
     """
     global _current_context
@@ -290,21 +359,8 @@ def reset_database_engine(new_db_url: Optional[str] = None):
     # If this raises any exception, _current_context is completely untouched!
     new_eng, new_sess = _create_engine_and_session(url)
 
-    # Step 2: Transfer registered event listeners to the new engine
-    with _state_lock:
-        old_ctx = _current_context
-        if old_ctx and old_ctx.engine:
-            if getattr(old_ctx.engine, "_has_events", False):
-                new_eng._has_events = True
-            for name in dir(old_ctx.engine.dispatch):
-                if not name.startswith('_'):
-                    col = getattr(old_ctx.engine.dispatch, name, None)
-                    if col and hasattr(col, '__iter__') and len(col) > 0:
-                        for item in col:
-                            try:
-                                event.listen(new_eng, name, item)
-                            except Exception:
-                                pass
+    # Step 2: Replay authoritative event listeners on the new engine (DEFECT-15D27-02)
+    _engine_event_registry.replay_on_engine(new_eng)
 
     # Step 3: Under _rebind_lock, atomically swap to new context and retire old context
     new_ctx = ManagedEngineContext(new_eng, new_sess, url)

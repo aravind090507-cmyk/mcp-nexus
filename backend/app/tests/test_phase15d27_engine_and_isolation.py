@@ -142,6 +142,45 @@ def test_sqlalchemy_event_registration_and_replay():
                 pass
 
 
+def test_event_listener_removal_after_engine_rebinding():
+    """Verify that user event listeners can be reliably removed after engine rebinds (DEFECT-15D27-02)."""
+    events_captured = []
+
+    def on_cursor_exec(conn, cursor, statement, parameters, context, executemany):
+        if "SELECT 'evt_removal_test'" in statement:
+            events_captured.append("captured")
+
+    event.listen(engine, "before_cursor_execute", on_cursor_exec)
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        tmp_db = tmp.name
+    tmp_url = f"sqlite:///{tmp_db}"
+
+    try:
+        # Rebind to new engine
+        reset_database_engine(tmp_url)
+
+        # Verify listener fires on rebound engine
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 'evt_removal_test'"))
+        assert len(events_captured) == 1
+
+        # Now remove listener using proxy remove_listener
+        engine.remove_listener("before_cursor_execute", on_cursor_exec)
+
+        # Verify listener no longer fires on rebound engine
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 'evt_removal_test'"))
+        assert len(events_captured) == 1  # Unchanged!
+    finally:
+        reset_database_engine(_global_isolated_url)
+        if os.path.exists(tmp_db):
+            try:
+                os.remove(tmp_db)
+            except Exception:
+                pass
+
+
 # ==============================================================================
 # 3. CONCURRENCY & LEASE TRACKING TESTS
 # ==============================================================================
@@ -208,6 +247,42 @@ def test_engine_rebinding_preserves_active_leases_without_premature_disposal():
                 os.remove(tmp_db)
             except Exception:
                 pass
+
+
+def test_abandoned_session_gc_releases_engine_lease():
+    """Verify that abandoned SessionLocal objects are collected by GC and release engine leases (DEFECT-15D27-01)."""
+    import gc
+    ctx = engine.managed_context
+    initial_leases = ctx.active_leases
+
+    def _open_and_abandon():
+        s = SessionLocal()
+        assert ctx.active_leases == initial_leases + 1
+        # Abandon session s without calling .close()
+        return None
+
+    _open_and_abandon()
+    # Force garbage collection to trigger weakref.finalize
+    gc.collect()
+    assert ctx.active_leases == initial_leases
+
+
+def test_abandoned_connection_gc_releases_engine_lease():
+    """Verify that abandoned engine.connect() objects are collected by GC and release engine leases (DEFECT-15D27-01)."""
+    import gc
+    ctx = engine.managed_context
+    initial_leases = ctx.active_leases
+
+    def _open_and_abandon():
+        c = engine.connect()
+        assert ctx.active_leases == initial_leases + 1
+        # Abandon connection c without calling .close()
+        return None
+
+    _open_and_abandon()
+    # Force garbage collection to trigger weakref.finalize
+    gc.collect()
+    assert ctx.active_leases == initial_leases
 
 
 def test_failed_rebind_preserves_active_engine():
