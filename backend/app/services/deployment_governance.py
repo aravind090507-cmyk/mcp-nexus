@@ -56,20 +56,23 @@ class DeploymentGovernanceService:
     @classmethod
     def get_server_state(cls, server: MCPServer) -> DeploymentState:
         """Retrieves the authoritative deployment state of a server (defaults to PREPARED if enabled)."""
-        env_vars = server.env_vars or {}
-        raw = env_vars.get("DEPLOYMENT_STATE")
-        if not raw:
-            return DeploymentState.PREPARED if getattr(server, "is_enabled", True) else DeploymentState.DISABLED
         try:
+            env_vars = getattr(server, "env_vars", None) or {}
+            raw = env_vars.get("DEPLOYMENT_STATE")
+            if not raw:
+                return DeploymentState.PREPARED if getattr(server, "is_enabled", True) else DeploymentState.DISABLED
             return DeploymentState(raw)
-        except ValueError:
-            return DeploymentState.DISABLED
+        except Exception:
+            return DeploymentState.PREPARED if getattr(server, "is_enabled", True) else DeploymentState.DISABLED
 
     @classmethod
     def get_transition_history(cls, server: MCPServer) -> List[Dict[str, Any]]:
         """Retrieves auditable deployment transition history for a server."""
-        env_vars = server.env_vars or {}
-        return list(env_vars.get("DEPLOYMENT_HISTORY", []))
+        try:
+            env_vars = getattr(server, "env_vars", None) or {}
+            return list(env_vars.get("DEPLOYMENT_HISTORY", []))
+        except Exception:
+            return []
 
     @classmethod
     def transition_state(
@@ -92,52 +95,82 @@ class DeploymentGovernanceService:
         - State is persisted to server.env_vars to survive application restarts.
         """
         with cls._state_lock:
+            initial_state = cls.get_server_state(server)
+
             # 1. RBAC authorization check on actor
             if actor.role not in _AUTHORIZED_ROLES:
                 logger.warning(f"Unauthorized deployment state transition attempt by {actor.email} (role: {actor.role}).")
-                return False, f"Access denied: Role '{actor.role}' is not authorized to modify deployment states.", cls.get_server_state(server)
+                return False, f"Access denied: Role '{actor.role}' is not authorized to modify deployment states.", initial_state
 
             # 2. Concurrency Control & Authoritative Database Row Re-query:
             # Re-query server inside transaction with engine-aware locking to prevent lost updates across workers.
             bind = db.get_bind()
             dialect_name = bind.dialect.name.lower() if bind else "sqlite"
 
-            query = db.query(MCPServer).filter(MCPServer.id == server.id)
-            if dialect_name != "sqlite":
-                # For PostgreSQL/MySQL/Oracle, acquire row-level exclusive lock
-                query = query.with_for_update()
+            from sqlalchemy import text
+            if dialect_name == "sqlite":
+                # Guarantee cross-process serialized write lock in SQLite before reading authoritative state
+                try:
+                    db.execute(text("BEGIN IMMEDIATE"))
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if "database is locked" in err_msg or "busy" in err_msg:
+                        logger.warning(f"Concurrent state transition detected (SQLite database locked): {e}")
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                        return False, "Database is locked: concurrent deployment state transition in progress.", initial_state
+                    elif "cannot start a transaction within a transaction" in err_msg:
+                        pass
+                    else:
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                        raise
 
-            locked_server = query.first()
-            if not locked_server:
-                return False, f"Server '{server.id}' not found in database.", cls.get_server_state(server)
-
-            # Ensure session is not seeing stale cached attributes across transactions
-            db.refresh(locked_server)
-
-            # 3. Tenant isolation (using re-queried authoritative record)
-            if str(locked_server.organization_id) != str(actor.organization_id):
-                logger.error(f"Tenant isolation failure: User '{actor.email}' (org {actor.organization_id}) attempted transition on server '{locked_server.name}' (org {locked_server.organization_id}).")
-                return False, "Access denied: Cannot alter deployment state of another organization's server.", cls.get_server_state(locked_server)
-
-            # 4. Read authoritative current state after acquiring lock
-            current_state = cls.get_server_state(locked_server)
-
-            # 5. Check for emergency shutdown override
-            from app.mcp.persistent_session import PersistentSessionManager
-            if PersistentSessionManager.is_emergency_disabled() and target_state in (DeploymentState.CANARY_AUTHORIZED, DeploymentState.CANARY_ACTIVE):
-                return False, "Transition rejected: Global emergency kill switch is currently ENGAGED.", current_state
-
-            # 6. Phase 15D.3 Safety Gate: Prevent premature activation of canary traffic
-            if target_state == DeploymentState.CANARY_ACTIVE:
-                return False, "Transition rejected: CANARY_ACTIVE is gated and strictly forbidden in Phase 15D.3 (Readiness only).", current_state
-
-            # 7. Transition matrix check
-            allowed_targets = _VALID_TRANSITIONS.get(current_state, [])
-            if target_state not in allowed_targets and target_state != DeploymentState.ROLLBACK:
-                return False, f"Invalid transition: Cannot transition from '{current_state.value}' to '{target_state.value}'.", current_state
-
-            # 8. Apply state transition and update audit history atomically
             try:
+                query = db.query(MCPServer).filter(MCPServer.id == server.id)
+                if dialect_name != "sqlite":
+                    # For PostgreSQL/MySQL/Oracle, acquire row-level exclusive lock
+                    query = query.with_for_update()
+
+                locked_server = query.first()
+                if not locked_server:
+                    db.rollback()
+                    return False, f"Server '{server.id}' not found in database.", initial_state
+
+                # Ensure session is not seeing stale cached attributes across transactions
+                db.refresh(locked_server)
+
+                # 3. Tenant isolation (using re-queried authoritative record)
+                if str(locked_server.organization_id) != str(actor.organization_id):
+                    logger.error(f"Tenant isolation failure: User '{actor.email}' (org {actor.organization_id}) attempted transition on server '{locked_server.name}' (org {locked_server.organization_id}).")
+                    db.rollback()
+                    return False, "Access denied: Cannot alter deployment state of another organization's server.", cls.get_server_state(locked_server)
+
+                # 4. Read authoritative current state after acquiring lock
+                current_state = cls.get_server_state(locked_server)
+
+                # 5. Check for emergency shutdown override
+                from app.mcp.persistent_session import PersistentSessionManager
+                if PersistentSessionManager.is_emergency_disabled() and target_state in (DeploymentState.CANARY_AUTHORIZED, DeploymentState.CANARY_ACTIVE):
+                    db.rollback()
+                    return False, "Transition rejected: Global emergency kill switch is currently ENGAGED.", current_state
+
+                # 6. Phase 15D.3 Safety Gate: Prevent premature activation of canary traffic
+                if target_state == DeploymentState.CANARY_ACTIVE:
+                    db.rollback()
+                    return False, "Transition rejected: CANARY_ACTIVE is gated and strictly forbidden in Phase 15D.3 (Readiness only).", current_state
+
+                # 7. Transition matrix check
+                allowed_targets = _VALID_TRANSITIONS.get(current_state, [])
+                if target_state not in allowed_targets and target_state != DeploymentState.ROLLBACK:
+                    db.rollback()
+                    return False, f"Invalid transition: Cannot transition from '{current_state.value}' to '{target_state.value}'.", current_state
+
+                # 8. Apply state transition and update audit history atomically
                 now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 new_env = dict(locked_server.env_vars or {})
                 history = list(new_env.get("DEPLOYMENT_HISTORY", []))
@@ -165,25 +198,31 @@ class DeploymentGovernanceService:
                 if target_state in (DeploymentState.ROLLBACK, DeploymentState.DISABLED):
                     PersistentSessionManager.shutdown_session(locked_server.id)
 
+                # Stage system audit log within the same database transaction (auto_commit=False)
+                audit_log = AuditService.record(
+                    db, "DEPLOYMENT_STATE_CHANGE", "SERVER", locked_server.id,
+                    user_name=actor.full_name, role=actor.role,
+                    details=f"Server '{locked_server.name}' deployment state transitioned: {current_state.value} -> {target_state.value}. Reason: {reason}",
+                    diff={"from": current_state.value, "to": target_state.value, "reason": reason},
+                    auto_commit=False
+                )
+
+                # Single atomic commit for both state transition and audit log
                 db.commit()
                 db.refresh(locked_server)
                 if server is not locked_server:
                     db.refresh(server)
-
-                # Record system audit log
-                AuditService.record(
-                    db, "DEPLOYMENT_STATE_CHANGE", "SERVER", locked_server.id,
-                    user_name=actor.full_name, role=actor.role,
-                    details=f"Server '{locked_server.name}' deployment state transitioned: {current_state.value} -> {target_state.value}. Reason: {reason}",
-                    diff={"from": current_state.value, "to": target_state.value, "reason": reason}
-                )
+                try:
+                    db.refresh(audit_log)
+                except Exception:
+                    pass
 
                 logger.info(f"Deployment state transitioned for '{locked_server.name}': {current_state.value} -> {target_state.value} by {actor.email}")
                 return True, f"Server deployment state successfully updated to {target_state.value}.", target_state
             except Exception as e:
                 db.rollback()
-                logger.error(f"Failed transaction during deployment state transition for '{locked_server.name}': {e}")
-                return False, f"Database transaction failed: {str(e)}", current_state
+                logger.error(f"Failed transaction during deployment state transition for '{server.name}': {e}")
+                return False, f"Database transaction failed: {str(e)}", cls.get_server_state(server)
 
     @classmethod
     def rollback_server(

@@ -12,7 +12,8 @@ class AuditService:
         user_name: str = "System",
         role: str = "ADMIN",
         details: Optional[str] = None,
-        diff: Optional[Dict[str, Any]] = None
+        diff: Optional[Dict[str, Any]] = None,
+        auto_commit: bool = True
     ) -> AuditLog:
         log = AuditLog(
             action=action,
@@ -24,6 +25,7 @@ class AuditService:
             diff=diff or {}
         )
         db.add(log)
-        db.commit()
-        db.refresh(log)
+        if auto_commit:
+            db.commit()
+            db.refresh(log)
         return log
