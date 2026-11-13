@@ -1,7 +1,12 @@
+import threading
 from typing import Optional
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from app.core.config import settings
+
+_engine_lock = threading.RLock()
+_current_engine = None
+_current_session_factory = None
 
 def _create_engine_and_session(db_url: str):
     connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
@@ -14,7 +19,22 @@ def _create_engine_and_session(db_url: str):
     return eng, sess_factory
 
 _current_engine, _current_session_factory = _create_engine_and_session(settings.DATABASE_URL)
-engine = _current_engine
+
+class _EngineProxy:
+    """
+    Transparent proxy to the active SQLAlchemy engine.
+    Ensures that any module that imported engine directly always routes
+    its connections, executions, and DDL bindings to the active rebound engine.
+    """
+    def __getattr__(self, name):
+        with _engine_lock:
+            return getattr(_current_engine, name)
+
+    def __repr__(self):
+        with _engine_lock:
+            return repr(_current_engine)
+
+engine = _EngineProxy()
 
 class _SessionLocalProxy:
     """
@@ -23,10 +43,13 @@ class _SessionLocalProxy:
     all modules holding a reference to SessionLocal automatically route to the rebound database.
     """
     def __call__(self, *args, **kwargs):
-        return _current_session_factory(*args, **kwargs)
+        with _engine_lock:
+            factory = _current_session_factory
+        return factory(*args, **kwargs)
 
     def __getattr__(self, name):
-        return getattr(_current_session_factory, name)
+        with _engine_lock:
+            return getattr(_current_session_factory, name)
 
 SessionLocal = _SessionLocalProxy()
 
@@ -36,12 +59,21 @@ def reset_database_engine(new_db_url: Optional[str] = None):
     """
     Dynamically rebinds the SQLAlchemy engine and session factory to a specified database URL
     or re-reads settings.DATABASE_URL. Used for environment transitions and isolated test harnesses.
+    Thread-safe and disposes of the previously active engine to prevent resource leaks.
     """
-    global _current_engine, _current_session_factory, engine
-    url = new_db_url or settings.DATABASE_URL
-    _current_engine, _current_session_factory = _create_engine_and_session(url)
-    engine = _current_engine
-    return engine, SessionLocal
+    global _current_engine, _current_session_factory
+    with _engine_lock:
+        old_engine = _current_engine
+        url = new_db_url or settings.DATABASE_URL
+        new_eng, new_sess = _create_engine_and_session(url)
+        _current_engine = new_eng
+        _current_session_factory = new_sess
+        if old_engine is not None and old_engine is not new_eng:
+            try:
+                old_engine.dispose()
+            except Exception:
+                pass
+    return _current_engine, SessionLocal
 
 def get_db():
     db = SessionLocal()
