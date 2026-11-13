@@ -10,12 +10,27 @@ import asyncio
 import time
 import json
 import statistics
+import sqlite3
 import psutil
 from datetime import datetime, timezone
 
+# Ensure Staging profile is active for canary runner
+os.environ["ENVIRONMENT"] = "Staging"
+
+# Initialize isolated staging database from clean baseline if missing
+staging_db_path = os.path.abspath("mcp_nexus_staging.db")
+dev_db_path = os.path.abspath("mcp_nexus.db")
+if not os.path.exists(staging_db_path) and os.path.exists(dev_db_path):
+    src = sqlite3.connect(dev_db_path)
+    dst = sqlite3.connect(staging_db_path)
+    src.backup(dst)
+    dst.close()
+    src.close()
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from app.core.config import settings
-from app.database.session import SessionLocal
+from app.database.session import SessionLocal, reset_database_engine
+reset_database_engine(settings.DATABASE_URL)
 from app.models.all_models import MCPServer, MCPTool, User, Organization, SecurityEvent, ExecutionTrace
 from app.services.mcp_manager import MCPManager
 from app.services.policy_engine import PolicyEngine, PolicyDecision
@@ -88,6 +103,11 @@ async def run_canary_validation():
         dec_tenant, msg_tenant, _ = PolicyEngine.validate_execution(db, unauth_tenant_user, erp_server, tool_status, None, {"project_id": "PRJ-MUM-001"})
         assert dec_tenant == PolicyDecision.BLOCKED, "Cross-tenant access must be BLOCKED."
         results["security_gates"]["cross_tenant_isolation"] = "PASSED (Strictly Blocked)"
+
+        # Immediately clean up temporary test entities to prevent database contamination
+        db.delete(unauth_tenant_user)
+        db.delete(fake_org)
+        db.commit()
 
         # B. Financial summary authorization check (Viewer vs Developer)
         dec_fin_dev, _, _ = PolicyEngine.validate_execution(db, dev_user, erp_server, tool_fin, None, {"project_id": "PRJ-MUM-001"})
@@ -227,16 +247,17 @@ async def run_canary_validation():
 
         settings.ENABLE_PERSISTENT_MCP_SESSIONS = True
         legacy_avg = statistics.mean(legacy_latencies)
-        canary_avg = results["canary_workload"]["avg_latency_ms"]
-        speedup = round(legacy_avg / max(0.01, canary_avg), 1)
+        seq_canary_avg = statistics.mean(seq_latencies)
+        seq_speedup = round(legacy_avg / max(0.01, seq_canary_avg), 1)
 
         results["legacy_baseline"] = {
             "sample_requests": len(legacy_latencies),
             "avg_latency_ms": round(legacy_avg, 2),
             "p50_latency_ms": round(statistics.median(legacy_latencies), 2),
-            "canary_speedup_factor": f"{speedup}x faster ({legacy_avg:.1f}ms -> {canary_avg:.2f}ms)"
+            "sequential_canary_avg_ms": round(seq_canary_avg, 2),
+            "sequential_speedup_factor": f"{seq_speedup}x lower latency ({legacy_avg:.1f}ms -> {seq_canary_avg:.2f}ms)"
         }
-        print(f"  -> Legacy Baseline: {legacy_avg:.2f}ms | Canary: {canary_avg:.2f}ms | Speedup: {speedup}x lower latency")
+        print(f"  -> Legacy Baseline: {legacy_avg:.2f}ms | Sequential Canary: {seq_canary_avg:.2f}ms | Sequential Speedup: {seq_speedup}x lower latency")
 
         # ======================================================================
         # 5. LIVE TELEMETRY & RESOURCE UTILIZATION

@@ -1,8 +1,8 @@
 {
-  "activation_timestamp_utc": "2026-11-13T04:25:16.027585+00:00",
+  "activation_timestamp_utc": "2026-11-13T04:57:50.860777+00:00",
   "staging_environment": {
     "profile": "Staging Isolated",
-    "database_url": "sqlite:///./mcp_nexus.db",
+    "database_url": "sqlite:///./mcp_nexus_staging.db",
     "target_server": "mcp-srv-erp-core",
     "global_flag_enabled": true,
     "canary_allowlist": "mcp-srv-erp-core",
@@ -18,77 +18,78 @@
     "successful_requests": 290,
     "failed_requests": 0,
     "success_rate_pct": 100.0,
-    "avg_latency_ms": 61.08,
-    "p50_latency_ms": 38.43,
-    "p95_latency_ms": 201.29,
-    "p99_latency_ms": 240.23,
+    "avg_latency_ms": 58.13,
+    "p50_latency_ms": 31.25,
+    "p95_latency_ms": 211.33,
+    "p99_latency_ms": 244.32,
     "concurrency_breakdown": {
       "C_1": {
         "requests": 10,
         "successes": 10,
-        "avg_latency_ms": 1.36,
-        "p50_latency_ms": 1.34,
-        "p95_latency_ms": 1.63,
-        "p99_latency_ms": 1.63,
-        "throughput_req_s": 93.9
+        "avg_latency_ms": 1.19,
+        "p50_latency_ms": 1.12,
+        "p95_latency_ms": 1.86,
+        "p99_latency_ms": 1.86,
+        "throughput_req_s": 96.3
       },
       "C_5": {
         "requests": 50,
         "successes": 50,
-        "avg_latency_ms": 20.83,
-        "p50_latency_ms": 20.87,
-        "p95_latency_ms": 44.0,
-        "p99_latency_ms": 47.01,
-        "throughput_req_s": 93.3
+        "avg_latency_ms": 16.7,
+        "p50_latency_ms": 15.5,
+        "p95_latency_ms": 31.52,
+        "p99_latency_ms": 42.89,
+        "throughput_req_s": 118.3
       },
       "C_10": {
         "requests": 100,
         "successes": 100,
-        "avg_latency_ms": 44.34,
-        "p50_latency_ms": 43.36,
-        "p95_latency_ms": 87.89,
-        "p99_latency_ms": 97.43,
-        "throughput_req_s": 98.8
+        "avg_latency_ms": 34.42,
+        "p50_latency_ms": 33.95,
+        "p95_latency_ms": 66.32,
+        "p99_latency_ms": 73.89,
+        "throughput_req_s": 126.2
       },
       "C_25": {
         "requests": 100,
         "successes": 100,
-        "avg_latency_ms": 121.75,
-        "p50_latency_ms": 122.97,
-        "p95_latency_ms": 231.47,
-        "p99_latency_ms": 252.67,
-        "throughput_req_s": 97.9
+        "avg_latency_ms": 125.27,
+        "p50_latency_ms": 125.5,
+        "p95_latency_ms": 235.99,
+        "p99_latency_ms": 259.55,
+        "throughput_req_s": 94.3
       }
     }
   },
   "legacy_baseline": {
     "sample_requests": 10,
-    "avg_latency_ms": 321.69,
-    "p50_latency_ms": 326.96,
-    "canary_speedup_factor": "5.3x faster (321.7ms -> 61.08ms)"
+    "avg_latency_ms": 280.96,
+    "p50_latency_ms": 279.63,
+    "sequential_canary_avg_ms": 1.41,
+    "sequential_speedup_factor": "199.8x lower latency (281.0ms -> 1.41ms)"
   },
   "chaos_and_recovery": {
-    "killed_pid": 26292,
+    "killed_pid": 29708,
     "recovery_call_success": true,
     "recovered_state": "WARM",
-    "new_pid": 29632,
+    "new_pid": 14320,
     "pid_cycled_cleanly": true
   },
   "rollback_validation": {
-    "emergency_disable_duration_ms": 36.81,
+    "emergency_disable_duration_ms": 29.22,
     "emergency_disabled": true,
     "persistent_subprocess_alive": false,
     "post_rollback_legacy_call_ok": true,
-    "post_rollback_latency_ms": 351.17,
+    "post_rollback_latency_ms": 302.6,
     "authorization_preserved": true
   },
   "live_telemetry": {
     "server_id": "6a2b66c3-d002-4213-96a7-287df8f8ab93",
     "server_name": "ERP MCP Server",
     "session_state": "WARM",
-    "subprocess_pid": 26292,
-    "host_rss_mb": 105.84,
-    "subprocess_rss_mb": 16.79,
+    "subprocess_pid": 29708,
+    "host_rss_mb": 106.51,
+    "subprocess_rss_mb": 16.72,
     "handles": 73,
     "pending_requests": 0,
     "total_requests_served": 290,

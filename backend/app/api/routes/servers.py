@@ -10,7 +10,7 @@ from app.schemas.all_schemas import (
 from app.services.mcp_manager import MCPManager
 from app.services.audit_service import AuditService
 from app.api.deps import get_current_user, require_permission
-from app.core.permissions import PermissionEnum
+from app.core.permissions import PermissionEnum, RoleEnum
 import datetime
 import sys
 
@@ -90,13 +90,30 @@ async def register_server(
 
 @router.get("/persistent/status")
 def get_persistent_sessions_status(
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
     Returns live pool status, health metrics, and subprocess memory for all persistent MCP sessions.
+    Restricted to authorized operators, developers, and administrators.
+    VIEWER users are strictly forbidden from inspecting OS processes and runtime handles.
     """
+    if current_user.role == RoleEnum.VIEWER.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: Operational session telemetry is restricted to authorized operators and administrators."
+        )
+
     from app.mcp.persistent_session import PersistentSessionManager
-    return PersistentSessionManager.get_pool_status()
+    pool_status = PersistentSessionManager.get_pool_status()
+
+    # Record audit log for privileged access to operational telemetry
+    AuditService.record(
+        db, "PERSISTENT_POOL_STATUS_READ", "SERVER", "SYSTEM",
+        user_name=current_user.full_name, role=current_user.role,
+        details=f"User '{current_user.email}' ({current_user.role}) inspected persistent MCP session pool metrics."
+    )
+    return pool_status
 
 @router.post("/persistent/emergency-disable")
 async def emergency_disable_persistent_sessions(

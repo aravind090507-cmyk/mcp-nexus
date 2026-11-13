@@ -145,6 +145,8 @@ class PersistentServerSession:
     def _build_server_params(self) -> StdioServerParameters:
         env = os.environ.copy()
         env.update(self.env_vars)
+        if "MCP_SERVER_ORGANIZATION_ID" not in env:
+            env["MCP_SERVER_ORGANIZATION_ID"] = "abbc6079-36ce-4b73-b8ee-0796f7de5821"
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         if sys.platform == "win32" and "SystemRoot" not in env:

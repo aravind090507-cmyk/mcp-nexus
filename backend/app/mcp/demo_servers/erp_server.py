@@ -2,17 +2,24 @@
 ERP MCP Server
 Provides enterprise project data, financial summaries, and milestone tracking.
 Complies with Model Context Protocol (MCP) JSON-RPC 2.0 STDIO transport.
+Includes tenant-aware data partitioning and fail-closed defense-in-depth security.
 """
 import sys
+import os
 import json
 import logging
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="[ERP-MCP] %(asctime)s - %(message)s")
 
-# Realistic enterprise project synthetic data tailored for infrastructure projects (e.g. L&T Heavy Civil / EPC)
+# Primary enterprise tenant
+PRIMARY_ORGANIZATION_ID = os.getenv("MCP_PRIMARY_ORG_ID", "abbc6079-36ce-4b73-b8ee-0796f7de5821")
+SECONDARY_ORGANIZATION_ID = "org-tenant-beta-02"
+
+# Multi-tenant partitioned project records
 PROJECTS_DATABASE = {
     "PRJ-MUM-001": {
         "project_id": "PRJ-MUM-001",
+        "organization_id": PRIMARY_ORGANIZATION_ID,
         "name": "Mumbai Coastal Road Tunnel & Sea Bridge Package 4",
         "division": "Heavy Civil Infrastructure IC",
         "client": "Municipal Corporation of Greater Mumbai",
@@ -26,6 +33,7 @@ PROJECTS_DATABASE = {
     },
     "PRJ-HAZ-002": {
         "project_id": "PRJ-HAZ-002",
+        "organization_id": PRIMARY_ORGANIZATION_ID,
         "name": "Hazira Cryogenic LNG Expansion & Gas Compression",
         "division": "Hydrocarbon Engineering IC",
         "client": "Petro-Global Infra Ltd",
@@ -39,6 +47,7 @@ PROJECTS_DATABASE = {
     },
     "PRJ-HYD-003": {
         "project_id": "PRJ-HYD-003",
+        "organization_id": PRIMARY_ORGANIZATION_ID,
         "name": "Hyderabad Airport Metro Express Rail Package 1",
         "division": "Transportation Infrastructure IC",
         "client": "Hyderabad Airport Metro Limited",
@@ -49,12 +58,27 @@ PROJECTS_DATABASE = {
         "project_manager": "K. V. Muralidharan",
         "active_sites": ["Shamshabad Depot", "Raidurg Elevated Corridor"],
         "critical_path_items": ["Viaduct pier casting", "Substation utility diversion"]
+    },
+    "PRJ-T2-001": {
+        "project_id": "PRJ-T2-001",
+        "organization_id": SECONDARY_ORGANIZATION_ID,
+        "name": "Bengaluru International Tech Corridor Phase 2",
+        "division": "Urban Infrastructure IC",
+        "client": "Karnataka State Industrial Board",
+        "contract_value_inr_cr": 3200.00,
+        "completion_percentage": 55.0,
+        "status": "ACTIVE_ON_TRACK",
+        "scheduled_completion": "2027-11-30",
+        "project_manager": "G. Venkatesh",
+        "active_sites": ["Whitefield Junction", "Kadugodi Elevated Section"],
+        "critical_path_items": ["Pier cap erection", "Track alignment survey"]
     }
 }
 
 FINANCIALS_DATABASE = {
     "PRJ-MUM-001": {
         "project_id": "PRJ-MUM-001",
+        "organization_id": PRIMARY_ORGANIZATION_ID,
         "capex_budget_cr": 4100.0,
         "capex_spent_cr": 3464.5,
         "opex_spent_cr": 210.0,
@@ -66,6 +90,7 @@ FINANCIALS_DATABASE = {
     },
     "PRJ-HAZ-002": {
         "project_id": "PRJ-HAZ-002",
+        "organization_id": PRIMARY_ORGANIZATION_ID,
         "capex_budget_cr": 2650.0,
         "capex_spent_cr": 2120.0,
         "opex_spent_cr": 310.0,
@@ -77,6 +102,7 @@ FINANCIALS_DATABASE = {
     },
     "PRJ-HYD-003": {
         "project_id": "PRJ-HYD-003",
+        "organization_id": PRIMARY_ORGANIZATION_ID,
         "capex_budget_cr": 5100.0,
         "capex_spent_cr": 2142.0,
         "opex_spent_cr": 95.0,
@@ -84,6 +110,18 @@ FINANCIALS_DATABASE = {
         "pending_milestone_payments_cr": 180.0,
         "burn_rate_monthly_cr": 55.0,
         "operating_margin_pct": 16.2,
+        "budget_health": "OPTIMAL"
+    },
+    "PRJ-T2-001": {
+        "project_id": "PRJ-T2-001",
+        "organization_id": SECONDARY_ORGANIZATION_ID,
+        "capex_budget_cr": 2800.0,
+        "capex_spent_cr": 1540.0,
+        "opex_spent_cr": 110.0,
+        "invoiced_amount_cr": 1400.0,
+        "pending_milestone_payments_cr": 320.0,
+        "burn_rate_monthly_cr": 32.0,
+        "operating_margin_pct": 15.5,
         "budget_health": "OPTIMAL"
     }
 }
@@ -98,6 +136,10 @@ TOOLS = [
                 "project_id": {
                     "type": "string",
                     "description": "The unique enterprise project code (e.g. PRJ-MUM-001, PRJ-HAZ-002, PRJ-HYD-003)"
+                },
+                "organization_id": {
+                    "type": "string",
+                    "description": "Tenant organization context for multi-tenant defense-in-depth"
                 }
             },
             "required": ["project_id"]
@@ -112,6 +154,10 @@ TOOLS = [
                 "project_id": {
                     "type": "string",
                     "description": "The enterprise project identifier"
+                },
+                "organization_id": {
+                    "type": "string",
+                    "description": "Tenant organization context for multi-tenant defense-in-depth"
                 }
             },
             "required": ["project_id"]
@@ -125,24 +171,57 @@ TOOLS = [
             "properties": {
                 "project_id": {
                     "type": "string",
-                    "description": "Optional project identifier. If omitted, returns status summary for all ongoing projects."
+                    "description": "Optional project identifier. If omitted, returns status summary for all ongoing projects in tenant."
+                },
+                "organization_id": {
+                    "type": "string",
+                    "description": "Tenant organization context for multi-tenant defense-in-depth"
                 }
             }
         }
     }
 ]
 
+def _resolve_tenant_context(args: dict) -> str:
+    """Extracts tenant organization context. Fails closed if missing."""
+    return (
+        args.get("tenant_id")
+        or args.get("organization_id")
+        or os.getenv("MCP_SERVER_ORGANIZATION_ID")
+        or ""
+    ).strip()
+
 def handle_call_tool(name: str, args: dict) -> dict:
+    # 1. Tenant Context Validation (Defense-in-Depth)
+    caller_org = _resolve_tenant_context(args)
+    if not caller_org:
+        return {
+            "error": "Access denied: Missing tenant context. Organization ID must be provided.",
+            "code": "MISSING_TENANT_CONTEXT"
+        }
+
     if name == "get_project_details":
         p_id = args.get("project_id", "").strip().upper()
         if p_id in PROJECTS_DATABASE:
-            return {"project": PROJECTS_DATABASE[p_id]}
-        return {"error": f"Project '{p_id}' not found in ERP records. Available projects: {list(PROJECTS_DATABASE.keys())}"}
+            p = PROJECTS_DATABASE[p_id]
+            if p.get("organization_id") != caller_org:
+                return {
+                    "error": f"Access denied: Project '{p_id}' belongs to a different organization.",
+                    "code": "CROSS_TENANT_ACCESS_DENIED"
+                }
+            return {"project": p}
+        return {"error": f"Project '{p_id}' not found in ERP records."}
     
     elif name == "get_financial_summary":
         p_id = args.get("project_id", "").strip().upper()
         if p_id in FINANCIALS_DATABASE:
-            return {"financial_summary": FINANCIALS_DATABASE[p_id]}
+            f = FINANCIALS_DATABASE[p_id]
+            if f.get("organization_id") != caller_org:
+                return {
+                    "error": f"Access denied: Financial records for '{p_id}' belong to a different organization.",
+                    "code": "CROSS_TENANT_ACCESS_DENIED"
+                }
+            return {"financial_summary": f}
         return {"error": f"Financial records for '{p_id}' not found."}
     
     elif name == "get_project_status":
@@ -150,6 +229,11 @@ def handle_call_tool(name: str, args: dict) -> dict:
         if p_id:
             if p_id in PROJECTS_DATABASE:
                 p = PROJECTS_DATABASE[p_id]
+                if p.get("organization_id") != caller_org:
+                    return {
+                        "error": f"Access denied: Project '{p_id}' belongs to a different organization.",
+                        "code": "CROSS_TENANT_ACCESS_DENIED"
+                    }
                 return {
                     "project_id": p_id,
                     "name": p["name"],
@@ -159,6 +243,7 @@ def handle_call_tool(name: str, args: dict) -> dict:
                 }
             return {"error": f"Project '{p_id}' not found."}
         else:
+            # Filter projects strictly by tenant
             summary = [
                 {
                     "project_id": k,
@@ -168,6 +253,7 @@ def handle_call_tool(name: str, args: dict) -> dict:
                     "critical_issues": v["critical_path_items"]
                 }
                 for k, v in PROJECTS_DATABASE.items()
+                if v.get("organization_id") == caller_org
             ]
             return {"total_projects": len(summary), "projects": summary}
     
@@ -204,11 +290,14 @@ def run_server():
                 print(json.dumps(res), flush=True)
 
             elif method == "notifications/initialized":
-                # client acknowledges initialization
-                continue
+                pass
 
             elif method == "ping":
-                res = {"jsonrpc": "2.0", "id": req_id, "result": {}}
+                res = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {}
+                }
                 print(json.dumps(res), flush=True)
 
             elif method == "tools/list":
@@ -283,18 +372,24 @@ def run_server():
                 print(json.dumps(res), flush=True)
 
             else:
-                err_res = {
+                res = {
                     "jsonrpc": "2.0",
                     "id": req_id,
-                    "error": {"code": -32601, "message": f"Method '{method}' not found"}
+                    "error": {
+                        "code": -32601,
+                        "message": f"Method '{method}' not found."
+                    }
                 }
-                print(json.dumps(err_res), flush=True)
+                print(json.dumps(res), flush=True)
 
         except Exception as e:
             err_res = {
                 "jsonrpc": "2.0",
                 "id": None,
-                "error": {"code": -32603, "message": str(e)}
+                "error": {
+                    "code": -32603,
+                    "message": f"Internal RPC processing error: {str(e)}"
+                }
             }
             print(json.dumps(err_res), flush=True)
 

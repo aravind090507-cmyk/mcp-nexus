@@ -5,3 +5,6 @@ __pycache__/
 .pytest_cache/
 .env
 *.log
+*.bak*
+mcp_nexus_staging.db
+test_*.db

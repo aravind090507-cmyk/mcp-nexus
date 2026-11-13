@@ -212,6 +212,16 @@ class MCPManager:
         if MCPConnectionManager.is_circuit_open(server.id):
             return {}, 0.0, False, f"Circuit breaker OPEN for server '{server.name}' due to repeated failures. Automatic failover active."
 
+        # Tenant Defense-in-Depth context injection
+        effective_args = dict(arguments or {})
+        if server.organization_id:
+            effective_args.setdefault("organization_id", server.organization_id)
+            effective_args.setdefault("tenant_id", server.organization_id)
+
+        effective_env = dict(server.env_vars or {})
+        if server.organization_id:
+            effective_env.setdefault("MCP_SERVER_ORGANIZATION_ID", server.organization_id)
+
         if MCPManager.is_persistent_enabled(server):
             try:
                 from app.mcp.persistent_session import PersistentSessionManager
@@ -223,10 +233,10 @@ class MCPManager:
                     server_name=server.name,
                     command=cmd,
                     args=server.args or [],
-                    env_vars=server.env_vars or {},
+                    env_vars=effective_env,
                     cwd=os.getcwd(),
                     tool_name=tool.name,
-                    arguments=arguments,
+                    arguments=effective_args,
                     timeout=server.connection_timeout or 30.0
                 )
                 MCPConnectionManager.record_success(server.id)
@@ -259,7 +269,7 @@ class MCPManager:
         lock = MCPConnectionManager.get_lock(server.id)
         async with lock:
             try:
-                res, duration_ms = await client.call_tool(tool.name, arguments)
+                res, duration_ms = await client.call_tool(tool.name, effective_args)
                 MCPConnectionManager.record_success(server.id)
                 
                 # Update metrics
