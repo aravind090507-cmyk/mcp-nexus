@@ -32,6 +32,33 @@ def reset_sessions_fixture():
     PersistentSessionManager.reset()
 
 
+@pytest.fixture(scope="module", autouse=True)
+def isolated_test_database(tmp_path_factory):
+    """
+    Creates an isolated copy of the database in a temporary directory for canary live tests.
+    Ensures zero mutation of real development or staging databases.
+    """
+    import shutil
+    from app.database.session import reset_database_engine
+    
+    orig_db_url = settings.DATABASE_URL
+    temp_dir = tmp_path_factory.mktemp("db_canary_live")
+    temp_db_path = temp_dir / "isolated_canary_live_test.db"
+    
+    dev_db_path = settings.resolve_absolute_db_path()
+    if os.path.exists(dev_db_path):
+        shutil.copy2(dev_db_path, str(temp_db_path))
+    
+    isolated_db_url = f"sqlite:///{temp_db_path}"
+    settings.DATABASE_URL = isolated_db_url
+    reset_database_engine(isolated_db_url)
+    
+    yield isolated_db_url
+    
+    settings.DATABASE_URL = orig_db_url
+    reset_database_engine(orig_db_url)
+
+
 @pytest.fixture(scope="module")
 def db_session():
     db = SessionLocal()
@@ -51,46 +78,59 @@ async def test_canary_preactivation_security_gate(db_session):
     assert dev_user is not None
     assert viewer_user is not None
 
-    # Create temporary rogue tenant
-    fake_org = Organization(name="Pytest Rogue Corp", slug=f"rogue-{int(time.time())}")
-    db_session.add(fake_org)
-    db_session.commit()
+    fake_org = None
+    unauth_user = None
+    try:
+        # Create temporary rogue tenant
+        fake_org = Organization(name="Pytest Rogue Corp", slug=f"rogue-{int(time.time())}")
+        db_session.add(fake_org)
+        db_session.commit()
 
-    unauth_user = User(
-        organization_id=fake_org.id,
-        email=f"spy-{int(time.time())}@{fake_org.slug}.com",
-        full_name="External Infiltrator",
-        hashed_password="dummy",
-        role="DEVELOPER",
-    )
-    db_session.add(unauth_user)
-    db_session.commit()
+        unauth_user = User(
+            organization_id=fake_org.id,
+            email=f"spy-{int(time.time())}@{fake_org.slug}.com",
+            full_name="External Infiltrator",
+            hashed_password="dummy",
+            role="DEVELOPER",
+        )
+        db_session.add(unauth_user)
+        db_session.commit()
 
-    tool_status = db_session.query(MCPTool).filter(MCPTool.server_id == erp_server.id, MCPTool.name == "get_project_status").first()
-    tool_fin = db_session.query(MCPTool).filter(MCPTool.server_id == erp_server.id, MCPTool.name == "get_financial_summary").first()
+        tool_status = db_session.query(MCPTool).filter(MCPTool.server_id == erp_server.id, MCPTool.name == "get_project_status").first()
+        tool_fin = db_session.query(MCPTool).filter(MCPTool.server_id == erp_server.id, MCPTool.name == "get_financial_summary").first()
 
-    # 1. Tenant boundary enforcement
-    dec_tenant, msg_tenant, _ = PolicyEngine.validate_execution(
-        db_session, unauth_user, erp_server, tool_status, None, {"project_id": "PRJ-MUM-001"}
-    )
-    assert dec_tenant == PolicyDecision.BLOCKED
-    assert "Tenant boundary mismatch" in msg_tenant or "tenant" in msg_tenant.lower()
+        # 1. Tenant boundary enforcement
+        dec_tenant, msg_tenant, _ = PolicyEngine.validate_execution(
+            db_session, unauth_user, erp_server, tool_status, None, {"project_id": "PRJ-MUM-001"}
+        )
+        assert dec_tenant == PolicyDecision.BLOCKED
+        assert "Tenant boundary mismatch" in msg_tenant or "tenant" in msg_tenant.lower()
 
-    # 2. RBAC check on read-only financial tool
-    dec_dev, _, _ = PolicyEngine.validate_execution(
-        db_session, dev_user, erp_server, tool_fin, None, {"project_id": "PRJ-MUM-001"}
-    )
-    assert dec_dev == PolicyDecision.PERMITTED
+        # 2. RBAC check on read-only financial tool
+        dec_dev, _, _ = PolicyEngine.validate_execution(
+            db_session, dev_user, erp_server, tool_fin, None, {"project_id": "PRJ-MUM-001"}
+        )
+        assert dec_dev == PolicyDecision.PERMITTED
 
-    dec_viewer, _, _ = PolicyEngine.validate_execution(
-        db_session, viewer_user, erp_server, tool_fin, None, {"project_id": "PRJ-MUM-001"}
-    )
-    assert dec_viewer == PolicyDecision.BLOCKED
-
-    # Cleanup temp user/org
-    db_session.delete(unauth_user)
-    db_session.delete(fake_org)
-    db_session.commit()
+        dec_viewer, _, _ = PolicyEngine.validate_execution(
+            db_session, viewer_user, erp_server, tool_fin, None, {"project_id": "PRJ-MUM-001"}
+        )
+        assert dec_viewer == PolicyDecision.BLOCKED
+    finally:
+        if unauth_user:
+            try:
+                db_session.delete(unauth_user)
+            except Exception:
+                pass
+        if fake_org:
+            try:
+                db_session.delete(fake_org)
+            except Exception:
+                pass
+        try:
+            db_session.commit()
+        except Exception:
+            db_session.rollback()
 
 
 @pytest.mark.asyncio

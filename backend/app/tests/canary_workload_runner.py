@@ -82,32 +82,46 @@ async def run_canary_validation():
 
         # A. Tenant-level isolation check
         org1 = db.query(Organization).filter(Organization.id == erp_server.organization_id).first()
-        fake_org = Organization(name="Rival Construction Corp", slug=f"rival-{int(time.time())}")
-        db.add(fake_org)
-        db.commit()
-        unauth_tenant_user = User(
-            organization_id=fake_org.id,
-            email=f"spy@{fake_org.slug}.com",
-            full_name="External Tenant Infiltrator",
-            hashed_password="dummy",
-            role="DEVELOPER"
-        )
-        db.add(unauth_tenant_user)
-        db.commit()
+        fake_org = None
+        unauth_tenant_user = None
+        try:
+            fake_org = Organization(name="Rival Construction Corp", slug=f"rival-{int(time.time())}")
+            db.add(fake_org)
+            db.commit()
+            unauth_tenant_user = User(
+                organization_id=fake_org.id,
+                email=f"spy@{fake_org.slug}.com",
+                full_name="External Tenant Infiltrator",
+                hashed_password=get_password_hash("AuditPass@2026"),
+                role="DEVELOPER"
+            )
+            db.add(unauth_tenant_user)
+            db.commit()
 
-        tool_status = db.query(MCPTool).filter(MCPTool.server_id == erp_server.id, MCPTool.name == "get_project_status").first()
-        tool_fin = db.query(MCPTool).filter(MCPTool.server_id == erp_server.id, MCPTool.name == "get_financial_summary").first()
-        tool_det = db.query(MCPTool).filter(MCPTool.server_id == erp_server.id, MCPTool.name == "get_project_details").first()
+            tool_status = db.query(MCPTool).filter(MCPTool.server_id == erp_server.id, MCPTool.name == "get_project_status").first()
+            tool_fin = db.query(MCPTool).filter(MCPTool.server_id == erp_server.id, MCPTool.name == "get_financial_summary").first()
+            tool_det = db.query(MCPTool).filter(MCPTool.server_id == erp_server.id, MCPTool.name == "get_project_details").first()
 
-        # Check tenant access rejection
-        dec_tenant, msg_tenant, _ = PolicyEngine.validate_execution(db, unauth_tenant_user, erp_server, tool_status, None, {"project_id": "PRJ-MUM-001"})
-        assert dec_tenant == PolicyDecision.BLOCKED, "Cross-tenant access must be BLOCKED."
-        results["security_gates"]["cross_tenant_isolation"] = "PASSED (Strictly Blocked)"
-
-        # Immediately clean up temporary test entities to prevent database contamination
-        db.delete(unauth_tenant_user)
-        db.delete(fake_org)
-        db.commit()
+            # Check tenant access rejection
+            dec_tenant, msg_tenant, _ = PolicyEngine.validate_execution(db, unauth_tenant_user, erp_server, tool_status, None, {"project_id": "PRJ-MUM-001"})
+            assert dec_tenant == PolicyDecision.BLOCKED, "Cross-tenant access must be BLOCKED."
+            results["security_gates"]["cross_tenant_isolation"] = "PASSED (Strictly Blocked)"
+        finally:
+            # Immediately clean up temporary test entities to prevent database contamination
+            if unauth_tenant_user:
+                try:
+                    db.delete(unauth_tenant_user)
+                except Exception:
+                    pass
+            if fake_org:
+                try:
+                    db.delete(fake_org)
+                except Exception:
+                    pass
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
 
         # B. Financial summary authorization check (Viewer vs Developer)
         dec_fin_dev, _, _ = PolicyEngine.validate_execution(db, dev_user, erp_server, tool_fin, None, {"project_id": "PRJ-MUM-001"})

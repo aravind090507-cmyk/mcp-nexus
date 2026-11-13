@@ -6,5 +6,6 @@ __pycache__/
 .env
 *.log
 *.bak*
-mcp_nexus_staging.db
-test_*.db
+*.db
+*.sqlite
+*.sqlite3

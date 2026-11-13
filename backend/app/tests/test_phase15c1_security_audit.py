@@ -34,6 +34,34 @@ def admin_headers(client):
     token = res.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
 
+@pytest.fixture(scope="module", autouse=True)
+def isolated_test_database(tmp_path_factory):
+    """
+    Creates an isolated copy of the database in a temporary directory for this test module.
+    Rebinds SQLAlchemy engine and SessionLocal so no test mutations touch the real development DB.
+    Guarantees clean teardown even on assertion failure.
+    """
+    import shutil
+    from app.database.session import reset_database_engine
+    
+    orig_db_url = settings.DATABASE_URL
+    temp_dir = tmp_path_factory.mktemp("db_phase15c1")
+    temp_db_path = temp_dir / "isolated_phase15c1_test.db"
+    
+    dev_db_path = settings.resolve_absolute_db_path()
+    if os.path.exists(dev_db_path):
+        shutil.copy2(dev_db_path, str(temp_db_path))
+    
+    isolated_db_url = f"sqlite:///{temp_db_path}"
+    settings.DATABASE_URL = isolated_db_url
+    reset_database_engine(isolated_db_url)
+    
+    yield isolated_db_url
+    
+    # Teardown: Restore original database configuration
+    settings.DATABASE_URL = orig_db_url
+    reset_database_engine(orig_db_url)
+
 @pytest.fixture(autouse=True)
 def clean_test_environment():
     orig_enabled = settings.ENABLE_PERSISTENT_MCP_SESSIONS
@@ -54,6 +82,8 @@ def clean_test_environment():
 def test_tenant_isolation_policy_engine_blocks_cross_tenant_access():
     """Audit: PolicyEngine must strictly block a tenant from accessing another tenant's server."""
     db = SessionLocal()
+    org2 = None
+    user2 = None
     try:
         # Create Tenant 1 (Org 1) and Tenant 2 (Org 2)
         org1 = db.query(Organization).first()
@@ -102,6 +132,20 @@ def test_tenant_isolation_policy_engine_blocks_cross_tenant_access():
         assert sec_evt is not None
         assert "Cross-tenant violation" in sec_evt.description
     finally:
+        if user2:
+            try:
+                db.delete(user2)
+            except Exception:
+                pass
+        if org2:
+            try:
+                db.delete(org2)
+            except Exception:
+                pass
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
         db.close()
 
 

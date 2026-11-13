@@ -212,15 +212,41 @@ class MCPManager:
         if MCPConnectionManager.is_circuit_open(server.id):
             return {}, 0.0, False, f"Circuit breaker OPEN for server '{server.name}' due to repeated failures. Automatic failover active."
 
-        # Tenant Defense-in-Depth context injection
+        # Tenant Defense-in-Depth: Server organization identity validation (fail closed)
+        if not server.organization_id or not str(server.organization_id).strip():
+            logger.error(f"Tenant isolation failure: Server '{server.name}' has no organization_id configured.")
+            return {}, 0.0, False, f"Access denied: Server '{server.name}' has no authoritative organization_id configured."
+
+        auth_org_id = str(server.organization_id).strip()
+
+        # Validate that the organization exists and is valid
+        if db is not None:
+            from app.models.all_models import Organization
+            org_exists = db.query(Organization).filter(Organization.id == auth_org_id).first()
+            if not org_exists:
+                logger.error(f"Tenant isolation failure: Server '{server.name}' references invalid organization_id '{auth_org_id}'.")
+                return {}, 0.0, False, f"Access denied: Server '{server.name}' has invalid organization_id '{auth_org_id}'."
+
+        # Authoritative Tenant Binding: Never trust caller-supplied tenant arguments
         effective_args = dict(arguments or {})
-        if server.organization_id:
-            effective_args.setdefault("organization_id", server.organization_id)
-            effective_args.setdefault("tenant_id", server.organization_id)
+        effective_args["organization_id"] = auth_org_id
+        effective_args["tenant_id"] = auth_org_id
+
+        # Sanitize any alternate or alias parameter keys if present
+        for alias in ("org_id", "organizationId", "tenantId", "org"):
+            if alias in effective_args:
+                effective_args[alias] = auth_org_id
+
+        # Sanitize nested context arguments (e.g. arguments["context"]["organization_id"])
+        if isinstance(effective_args.get("context"), dict):
+            ctx = dict(effective_args["context"])
+            for ctx_key in ("organization_id", "tenant_id", "org_id", "organizationId", "tenantId"):
+                if ctx_key in ctx:
+                    ctx[ctx_key] = auth_org_id
+            effective_args["context"] = ctx
 
         effective_env = dict(server.env_vars or {})
-        if server.organization_id:
-            effective_env.setdefault("MCP_SERVER_ORGANIZATION_ID", server.organization_id)
+        effective_env["MCP_SERVER_ORGANIZATION_ID"] = auth_org_id
 
         if MCPManager.is_persistent_enabled(server):
             try:

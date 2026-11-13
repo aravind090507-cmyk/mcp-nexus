@@ -183,13 +183,15 @@ TOOLS = [
 ]
 
 def _resolve_tenant_context(args: dict) -> str:
-    """Extracts tenant organization context. Fails closed if missing."""
-    return (
-        args.get("tenant_id")
-        or args.get("organization_id")
-        or os.getenv("MCP_SERVER_ORGANIZATION_ID")
-        or ""
-    ).strip()
+    """
+    Extracts tenant organization context. Fails closed if missing.
+    Per-request argument context strictly takes precedence over static process environment variables.
+    """
+    if "tenant_id" in args:
+        return str(args.get("tenant_id") or "").strip()
+    if "organization_id" in args:
+        return str(args.get("organization_id") or "").strip()
+    return str(os.getenv("MCP_SERVER_ORGANIZATION_ID") or "").strip()
 
 def handle_call_tool(name: str, args: dict) -> dict:
     # 1. Tenant Context Validation (Defense-in-Depth)
