@@ -88,6 +88,53 @@ async def register_server(
 
     return server
 
+@router.get("/persistent/status")
+def get_persistent_sessions_status(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Returns live pool status, health metrics, and subprocess memory for all persistent MCP sessions.
+    """
+    from app.mcp.persistent_session import PersistentSessionManager
+    return PersistentSessionManager.get_pool_status()
+
+@router.post("/persistent/emergency-disable")
+async def emergency_disable_persistent_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission(PermissionEnum.SERVERS_WRITE))
+):
+    """
+    Emergency Kill Switch: Instantly terminates all persistent MCP sessions and forces
+    immediate failover to legacy per-call transport without application downtime or restart.
+    """
+    from app.mcp.persistent_session import PersistentSessionManager
+    res = await PersistentSessionManager.emergency_disable(
+        reason=f"Emergency disable invoked by {current_user.full_name} ({current_user.email})"
+    )
+    AuditService.record(
+        db, "EMERGENCY_DISABLE_PERSISTENT_SESSIONS", "SERVER", "SYSTEM",
+        user_name=current_user.full_name, role=current_user.role,
+        details="Emergency kill switch engaged: all persistent MCP sessions decommissioned. Failover to legacy transport active."
+    )
+    return res
+
+@router.post("/persistent/emergency-enable")
+def emergency_enable_persistent_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission(PermissionEnum.SERVERS_WRITE))
+):
+    """
+    Disengages emergency kill switch, restoring persistent session capability for enabled servers.
+    """
+    from app.mcp.persistent_session import PersistentSessionManager
+    res = PersistentSessionManager.emergency_enable()
+    AuditService.record(
+        db, "EMERGENCY_ENABLE_PERSISTENT_SESSIONS", "SERVER", "SYSTEM",
+        user_name=current_user.full_name, role=current_user.role,
+        details="Emergency kill switch disengaged: persistent MCP sessions re-enabled."
+    )
+    return res
+
 @router.get("/{server_id}", response_model=MCPServerOut)
 def get_server(
     server_id: str,

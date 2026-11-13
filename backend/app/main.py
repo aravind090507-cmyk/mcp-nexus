@@ -32,6 +32,19 @@ Base.metadata.create_all(bind=engine)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await startup_seed()
+    if getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False) and getattr(settings, "PERSISTENT_MCP_PREWARM_ON_STARTUP", False):
+        try:
+            from app.services.mcp_manager import MCPManager
+            db = SessionLocal()
+            try:
+                servers = db.query(MCPServer).filter(MCPServer.is_enabled == True, MCPServer.transport_type == "STDIO").all()
+                for s in servers:
+                    if MCPManager.is_persistent_enabled(s):
+                        asyncio.create_task(MCPManager.ping_server(s))
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Error pre-warming persistent MCP sessions: {e}")
     yield
     try:
         from app.mcp.persistent_session import PersistentSessionManager
@@ -84,11 +97,19 @@ def root():
 
 @app.get("/health")
 def health():
+    from app.mcp.persistent_session import PersistentSessionManager
+    persistent_status = "OPT_IN_DISABLED"
+    if getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False):
+        persistent_status = "EMERGENCY_DISABLED" if PersistentSessionManager.is_emergency_disabled() else "ACTIVE"
     return {
         "status": "HEALTHY",
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "database": "CONNECTED",
-        "governance_engine": "ACTIVE"
+        "governance_engine": "ACTIVE",
+        "mcp_transport": {
+            "persistent_sessions": persistent_status,
+            "fallback_enabled": getattr(settings, "PERSISTENT_MCP_FALLBACK_TO_LEGACY", True)
+        }
     }
 
 # Seed realistic enterprise data on first run

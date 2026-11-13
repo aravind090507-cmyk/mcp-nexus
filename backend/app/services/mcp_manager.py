@@ -14,6 +14,45 @@ logger = logging.getLogger(__name__)
 
 class MCPManager:
     @staticmethod
+    def is_persistent_enabled(server: MCPServer) -> bool:
+        """
+        Determines whether persistent session transport is active for the given MCP server.
+        Requires:
+        1. Global setting ENABLE_PERSISTENT_MCP_SESSIONS == True
+        2. Transport type == STDIO
+        3. Emergency kill switch is NOT engaged
+        4. Server is in PERSISTENT_MCP_SERVERS allowlist (or '*' for all)
+        5. Not explicitly disabled in server.env_vars
+        """
+        if not getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False):
+            return False
+        if server.transport_type != "STDIO":
+            return False
+
+        from app.mcp.persistent_session import PersistentSessionManager
+        if PersistentSessionManager.is_emergency_disabled():
+            return False
+
+        # Check server environment variables override
+        env_vars = server.env_vars or {}
+        if str(env_vars.get("ENABLE_PERSISTENT_SESSION", "")).lower() in ("false", "0", "no"):
+            return False
+        if str(env_vars.get("ENABLE_PERSISTENT_SESSION", "")).lower() in ("true", "1", "yes"):
+            return True
+
+        # Check rollout allowlist
+        allowed_servers = getattr(settings, "PERSISTENT_MCP_SERVERS", "*")
+        if allowed_servers == "*" or not allowed_servers.strip():
+            return True
+
+        items = [x.strip().lower() for x in allowed_servers.split(",") if x.strip()]
+        identifier = (server.identifier or "").lower()
+        server_id = (server.id or "").lower()
+        server_name = (server.name or "").lower()
+
+        return any(item in (identifier, server_id, server_name) for item in items)
+
+    @staticmethod
     def get_client_for_server(server: MCPServer) -> MCPClient:
         return MCPClient(
             transport_type=server.transport_type,
@@ -42,7 +81,7 @@ class MCPManager:
     @staticmethod
     async def ping_server(server: MCPServer) -> Tuple[bool, float, str]:
         """Sends a protocol ping returning (success, latency_ms, message)."""
-        if getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False) and server.transport_type == "STDIO":
+        if MCPManager.is_persistent_enabled(server):
             try:
                 from app.mcp.persistent_session import PersistentSessionManager
                 cmd = server.command
@@ -61,8 +100,11 @@ class MCPManager:
                 MCPConnectionManager.record_success(server.id)
                 return True, latency_ms, "Pong received from persistent MCP session."
             except Exception as e:
-                MCPConnectionManager.record_failure(server.id)
-                return False, 0.0, str(e)
+                logger.warning(f"Persistent ping failed on '{server.name}' ({e}).")
+                if not getattr(settings, "PERSISTENT_MCP_FALLBACK_TO_LEGACY", True):
+                    MCPConnectionManager.record_failure(server.id)
+                    return False, 0.0, str(e)
+                logger.info(f"Falling back to legacy ping for '{server.name}'...")
 
         client = MCPManager.get_client_for_server(server)
         lock = MCPConnectionManager.get_lock(server.id)
@@ -158,7 +200,7 @@ class MCPManager:
         if MCPConnectionManager.is_circuit_open(server.id):
             return {}, 0.0, False, f"Circuit breaker OPEN for server '{server.name}' due to repeated failures. Automatic failover active."
 
-        if getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False) and server.transport_type == "STDIO":
+        if MCPManager.is_persistent_enabled(server):
             try:
                 from app.mcp.persistent_session import PersistentSessionManager
                 cmd = server.command
@@ -186,15 +228,20 @@ class MCPManager:
 
                 return res, duration_ms, True, None
             except Exception as e:
-                tool.failed_executions += 1
-                server.error_rate = round(min(1.0, server.error_rate + 0.05), 3)
-                tripped = MCPConnectionManager.record_failure(server.id, server.name)
-                db.commit()
-                msg = f"Tool execution error: {str(e)}"
-                if tripped:
-                    msg += " [Circuit breaker TRIPPED to OPEN state]."
-                return {}, 0.0, False, msg
+                logger.warning(f"Persistent session execution failed for '{server.name}' tool '{tool.name}': {e}")
+                if getattr(settings, "PERSISTENT_MCP_FALLBACK_TO_LEGACY", True):
+                    logger.info(f"Safely falling back to legacy transport for '{server.name}' tool '{tool.name}'...")
+                else:
+                    tool.failed_executions += 1
+                    server.error_rate = round(min(1.0, server.error_rate + 0.05), 3)
+                    tripped = MCPConnectionManager.record_failure(server.id, server.name)
+                    db.commit()
+                    msg = f"Tool execution error: {str(e)}"
+                    if tripped:
+                        msg += " [Circuit breaker TRIPPED to OPEN state]."
+                    return {}, 0.0, False, msg
 
+        # Legacy Per-Call Transport
         client = MCPManager.get_client_for_server(server)
         lock = MCPConnectionManager.get_lock(server.id)
         async with lock:

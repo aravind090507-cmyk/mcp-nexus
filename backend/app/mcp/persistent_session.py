@@ -25,6 +25,25 @@ from app.core.config import settings
 
 logger = logging.getLogger("mcp-nexus.persistent-session")
 
+def sanitize_log_data(data: Any, max_len: int = 256) -> Any:
+    """Recursively redacts sensitive keys such as passwords, tokens, API keys, and authorization headers."""
+    SENSITIVE_KEYS = {"password", "secret", "token", "auth_token", "api_key", "authorization", "access_token"}
+    if isinstance(data, dict):
+        return {
+            k: ("[REDACTED]" if any(s in k.lower() for s in SENSITIVE_KEYS) else sanitize_log_data(v, max_len))
+            for k, v in data.items()
+        }
+    elif isinstance(data, list):
+        return [sanitize_log_data(item, max_len) for item in data]
+    elif isinstance(data, str):
+        # Redact raw Bearer tokens if present in strings
+        if "bearer " in data.lower():
+            import re
+            data = re.sub(r'(bearer\s+)[A-Za-z0-9_\-\.]+', r'\1[REDACTED]', data, flags=re.IGNORECASE)
+        if len(data) > max_len:
+            return data[:max_len] + "... [truncated]"
+    return data
+
 
 class SessionLifecycleState(str, Enum):
     """Explicit Lifecycle States for Persistent MCP Server Sessions."""
@@ -80,6 +99,12 @@ class PersistentServerSession:
         self._consecutive_failures = 0
         self._circuit_tripped_at: Optional[float] = None
         self._pid: Optional[int] = None
+
+        # Observability & Metrics
+        self._pending_requests: int = 0
+        self._total_requests: int = 0
+        self._total_errors: int = 0
+        self._total_latency_ms: float = 0.0
 
         # Thread and Event Loop ownership
         self._owning_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -362,13 +387,23 @@ class PersistentServerSession:
             if not ok:
                 raise RuntimeError(f"Cannot execute tool '{tool_name}': server '{self.server_name}' state is {self._state}.")
 
-        # If running on dedicated worker thread, dispatch to that loop
-        current_loop = asyncio.get_running_loop()
-        if self._owning_loop and current_loop != self._owning_loop:
-            fut = asyncio.run_coroutine_threadsafe(self._async_call_tool(tool_name, arguments), self._owning_loop)
-            return await asyncio.wrap_future(fut)
-        else:
-            return await self._async_call_tool(tool_name, arguments)
+        self._pending_requests += 1
+        try:
+            # If running on dedicated worker thread, dispatch to that loop
+            current_loop = asyncio.get_running_loop()
+            if self._owning_loop and current_loop != self._owning_loop:
+                fut = asyncio.run_coroutine_threadsafe(self._async_call_tool(tool_name, arguments), self._owning_loop)
+                res, lat = await asyncio.wrap_future(fut)
+            else:
+                res, lat = await self._async_call_tool(tool_name, arguments)
+            self._total_requests += 1
+            self._total_latency_ms += lat
+            return res, lat
+        except Exception as e:
+            self._total_errors += 1
+            raise e
+        finally:
+            self._pending_requests = max(0, self._pending_requests - 1)
 
     async def _async_call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
         """Runs call_tool on the session's owning event loop."""
@@ -397,8 +432,39 @@ class PersistentServerSession:
             return parsed, round(duration_ms, 2)
         except Exception as e:
             duration_ms = (time.perf_counter() - t0) * 1000.0
-            logger.error(f"[{self.server_name}] call_tool '{tool_name}' failed after {duration_ms:.1f}ms: {e}")
+            safe_err = sanitize_log_data(str(e))
+            logger.error(f"[{self.server_name}] call_tool '{tool_name}' failed after {duration_ms:.1f}ms: {safe_err}")
             raise e
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Returns live runtime observability metrics for this session."""
+        rss_mb = 0.0
+        handles = 0
+        if self._pid:
+            try:
+                import psutil
+                p = psutil.Process(self._pid)
+                if p.is_running():
+                    rss_mb = round(p.memory_info().rss / (1024 * 1024), 2)
+                    handles = p.num_handles() if hasattr(p, "num_handles") else 0
+            except Exception:
+                pass
+
+        avg_lat = round(self._total_latency_ms / max(1, self._total_requests), 2) if self._total_requests > 0 else 0.0
+        return {
+            "server_id": self.server_id,
+            "server_name": self.server_name,
+            "state": self._state.value,
+            "pid": self._pid,
+            "pending_requests": self._pending_requests,
+            "total_requests": self._total_requests,
+            "total_errors": self._total_errors,
+            "avg_latency_ms": avg_lat,
+            "consecutive_failures": self._consecutive_failures,
+            "circuit_tripped_at": self._circuit_tripped_at,
+            "memory_rss_mb": rss_mb,
+            "handles": handles,
+        }
 
     async def send_ping(self) -> float:
         """Explicit ping verifying connection latency."""
@@ -470,6 +536,71 @@ class PersistentSessionManager:
     """
     _sessions: Dict[str, PersistentServerSession] = {}
     _lock = threading.Lock()
+    _emergency_disabled: bool = False
+    _emergency_disabled_at: Optional[str] = None
+    _emergency_reason: Optional[str] = None
+
+    @classmethod
+    def is_emergency_disabled(cls) -> bool:
+        """Returns True if the operator emergency kill switch is currently engaged."""
+        return cls._emergency_disabled
+
+    @classmethod
+    async def emergency_disable(cls, reason: str = "Operator manual kill switch activated") -> Dict[str, Any]:
+        """
+        Emergency Kill Switch:
+        Immediately disables all persistent sessions and shuts down running subprocesses.
+        Forces 100% of traffic to route to legacy per-call transport without server restart.
+        """
+        import datetime
+        cls._emergency_disabled = True
+        cls._emergency_disabled_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cls._emergency_reason = reason
+        logger.warning(f"EMERGENCY KILL SWITCH ENGAGED: {reason}. Shutting down all persistent sessions.")
+        await cls.shutdown_all(timeout=2.0)
+        return {
+            "emergency_disabled": True,
+            "disabled_at": cls._emergency_disabled_at,
+            "reason": cls._emergency_reason,
+            "status": "ENGAGED"
+        }
+
+    @classmethod
+    def emergency_enable(cls) -> Dict[str, Any]:
+        """Restores persistent session capability after emergency shutdown."""
+        cls._emergency_disabled = False
+        cls._emergency_disabled_at = None
+        cls._emergency_reason = None
+        logger.info("Emergency kill switch disengaged. Persistent sessions re-enabled.")
+        return {
+            "emergency_disabled": False,
+            "status": "DISENGAGED"
+        }
+
+    @classmethod
+    def get_pool_status(cls) -> Dict[str, Any]:
+        """Returns aggregated operational status across all managed persistent MCP sessions."""
+        with cls._lock:
+            sessions = list(cls._sessions.values())
+
+        session_metrics = [s.get_metrics() for s in sessions]
+        active_count = sum(1 for m in session_metrics if m["state"] == SessionLifecycleState.WARM.value)
+        total_pending = sum(m["pending_requests"] for m in session_metrics)
+        total_rss = round(sum(m["memory_rss_mb"] for m in session_metrics), 2)
+        total_handles = sum(m["handles"] for m in session_metrics)
+
+        return {
+            "global_flag_enabled": getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False),
+            "emergency_disabled": cls._emergency_disabled,
+            "emergency_disabled_at": cls._emergency_disabled_at,
+            "emergency_reason": cls._emergency_reason,
+            "total_sessions": len(sessions),
+            "warm_sessions": active_count,
+            "total_pending_requests": total_pending,
+            "total_subprocess_rss_mb": total_rss,
+            "total_handles": total_handles,
+            "sessions": session_metrics
+        }
 
     @classmethod
     def get_session(

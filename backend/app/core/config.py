@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     
     # MCP Protocol & Session Management
     ENABLE_PERSISTENT_MCP_SESSIONS: bool = os.getenv("ENABLE_PERSISTENT_MCP_SESSIONS", "False").lower() == "true"
+    PERSISTENT_MCP_SERVERS: str = os.getenv("PERSISTENT_MCP_SERVERS", "*")  # Comma-separated server identifiers or '*' for all
+    PERSISTENT_MCP_FALLBACK_TO_LEGACY: bool = os.getenv("PERSISTENT_MCP_FALLBACK_TO_LEGACY", "True").lower() == "true"
+    PERSISTENT_MCP_PREWARM_ON_STARTUP: bool = os.getenv("PERSISTENT_MCP_PREWARM_ON_STARTUP", "False").lower() == "true"
     MCP_HEARTBEAT_INTERVAL_SECONDS: float = float(os.getenv("MCP_HEARTBEAT_INTERVAL_SECONDS", "30.0"))
     MCP_SESSION_RECONNECT_MAX_RETRIES: int = int(os.getenv("MCP_SESSION_RECONNECT_MAX_RETRIES", "3"))
     MCP_SESSION_PING_TIMEOUT_SECONDS: float = float(os.getenv("MCP_SESSION_PING_TIMEOUT_SECONDS", "5.0"))
