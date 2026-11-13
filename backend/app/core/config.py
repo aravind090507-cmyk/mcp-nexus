@@ -79,15 +79,48 @@ def _resolve_and_load_environment() -> str:
                 )
 
     elif env == "Production":
+        # Production never loads development .env; search exclusively for .env.production
+        prod_file = None
+        for d in search_dirs:
+            candidate = os.path.join(d, ".env.production")
+            if os.path.isfile(candidate):
+                prod_file = candidate
+                break
+        if prod_file:
+            load_dotenv(prod_file, override=False)
+
+        # Multi-worker deployment safety check (Requirement B & 7.3)
+        workers = int(os.getenv("WORKERS", os.getenv("WEB_CONCURRENCY", "1")))
+        prod_db = os.getenv("DATABASE_URL", "")
+        if workers > 1 and "sqlite" in prod_db.lower():
+            raise RuntimeError(
+                f"CRITICAL CONFIGURATION ERROR: Multi-worker deployment (WORKERS={workers}) cannot use SQLite database. "
+                "A clustered database (e.g., PostgreSQL) is strictly required for multi-worker concurrency."
+            )
+
         prod_secret = os.getenv("SECRET_KEY", "")
         if not prod_secret or len(prod_secret) < 32 or any(k in prod_secret.lower() for k in ("supersecret", "xyz", "vault", "default", "changeme")):
             raise RuntimeError(
                 "CRITICAL CONFIGURATION ERROR: Production SECRET_KEY must be a valid, cryptographically secure "
                 "enterprise secret of at least 32 characters."
             )
-        prod_db = os.getenv("DATABASE_URL", "")
+
         if not prod_db or "sqlite" in prod_db.lower():
             raise RuntimeError("CRITICAL CONFIGURATION ERROR: Production environment cannot use SQLite database.")
+        if "mcp_nexus.db" in prod_db.lower() or "staging" in prod_db.lower():
+            raise RuntimeError(
+                "CRITICAL CONFIGURATION ERROR: Production environment cannot use development or staging databases."
+            )
+
+        # DEBUG mode check in Production
+        if os.getenv("DEBUG", "False").lower() == "true":
+            raise RuntimeError("CRITICAL CONFIGURATION ERROR: DEBUG mode cannot be enabled in Production.")
+
+        # Persistent MCP session activation strictly forbidden in Production during Phase 15D.4.1
+        if os.getenv("ENABLE_PERSISTENT_MCP_SESSIONS", "False").lower() == "true":
+            raise RuntimeError(
+                "CRITICAL CONFIGURATION ERROR: Persistent MCP sessions are not authorized in Production during Phase 15D.4.1."
+            )
 
         # Wildcard persistent MCP session allowlist is strictly forbidden in Production
         persistent_servers = os.getenv("PERSISTENT_MCP_SERVERS", "")
@@ -105,6 +138,15 @@ def _resolve_and_load_environment() -> str:
                 load_dotenv(candidate, override=False)
                 break
 
+    # General multi-worker SQLite check across all environments
+    gen_workers = int(os.getenv("WORKERS", os.getenv("WEB_CONCURRENCY", "1")))
+    gen_db = os.getenv("DATABASE_URL", "")
+    if gen_workers > 1 and "sqlite" in gen_db.lower():
+        raise RuntimeError(
+            f"CRITICAL CONFIGURATION ERROR: Multi-worker deployment (WORKERS={gen_workers}) cannot use SQLite database. "
+            "A clustered database (e.g., PostgreSQL) is strictly required for multi-worker concurrency."
+        )
+
     return env
 
 _active_env = _resolve_and_load_environment()
@@ -117,7 +159,8 @@ class Settings(BaseSettings):
 
     # Environment
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", _active_env)
-    DEBUG: bool = os.getenv("DEBUG", "True").lower() == "true"
+    DEBUG: bool = os.getenv("DEBUG", "False" if os.getenv("ENVIRONMENT", _active_env).capitalize() == "Production" else "True").lower() == "true"
+    WORKERS: int = int(os.getenv("WORKERS", os.getenv("WEB_CONCURRENCY", "1")))
 
     # Security
     SECRET_KEY: str = os.getenv("SECRET_KEY", "mcp-nexus-enterprise-vault-supersecret-key-2026-xyz")
@@ -177,6 +220,13 @@ class Settings(BaseSettings):
         if env not in VALID_ENVIRONMENTS:
             raise RuntimeError(f"Startup check failed: Invalid ENVIRONMENT '{self.ENVIRONMENT}'.")
 
+        # Multi-worker deployment validation across all environments
+        workers = int(getattr(self, "WORKERS", os.getenv("WORKERS", os.getenv("WEB_CONCURRENCY", "1"))))
+        if workers > 1 and "sqlite" in self.DATABASE_URL.lower():
+            raise RuntimeError(
+                f"Startup check failed: Multi-worker deployment (WORKERS={workers}) cannot use SQLite."
+            )
+
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
         dev_db_canonical = os.path.normcase(os.path.realpath(os.path.abspath(os.path.join(repo_root, "mcp_nexus.db"))))
 
@@ -188,12 +238,20 @@ class Settings(BaseSettings):
                 )
 
         if env == "Production":
-            if not self.SECRET_KEY or len(self.SECRET_KEY) < 32 or any(k in self.SECRET_KEY.lower() for k in ("supersecret", "xyz", "vault", "default")):
+            if not self.SECRET_KEY or len(self.SECRET_KEY) < 32 or any(k in self.SECRET_KEY.lower() for k in ("supersecret", "xyz", "vault", "default", "changeme")):
                 raise RuntimeError("Startup check failed: Insecure SECRET_KEY in Production.")
             if "sqlite" in self.DATABASE_URL.lower():
                 raise RuntimeError("Startup check failed: SQLite is strictly forbidden in Production.")
+            if "mcp_nexus.db" in self.DATABASE_URL.lower() or "staging" in self.DATABASE_URL.lower():
+                raise RuntimeError("Startup check failed: Production cannot use development or staging databases.")
+            if self.DEBUG:
+                raise RuntimeError("Startup check failed: DEBUG mode cannot be enabled in Production.")
+            if self.ENABLE_PERSISTENT_MCP_SESSIONS:
+                raise RuntimeError("Startup check failed: Persistent MCP sessions are not authorized in Production during Phase 15D.4.1.")
             if self.PERSISTENT_MCP_SERVERS.strip() == "*":
                 raise RuntimeError("Startup check failed: Wildcard PERSISTENT_MCP_SERVERS='*' forbidden in Production.")
+            if self.LLM_PROVIDER in ("OPENAI", "ANTHROPIC", "GEMINI") and not self.LLM_API_KEY:
+                raise RuntimeError(f"Startup check failed: LLM_API_KEY is required in Production when LLM_PROVIDER is '{self.LLM_PROVIDER}'.")
 
         return {
             "environment": env,

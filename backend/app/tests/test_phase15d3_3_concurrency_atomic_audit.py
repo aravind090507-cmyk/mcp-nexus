@@ -450,13 +450,17 @@ def test_sqlite_multiprocess_cross_process_serialization():
 
     p1.start()
     p2.start()
+
+    # Collect outcomes from queue reliably with timeout
+    outcomes = []
+    for _ in range(2):
+        try:
+            outcomes.append(queue.get(timeout=15))
+        except Exception:
+            pass
+
     p1.join(timeout=10)
     p2.join(timeout=10)
-
-    # Collect outcomes from queue
-    outcomes = []
-    while not queue.empty():
-        outcomes.append(queue.get_nowait())
 
     assert len(outcomes) == 2
     for executed_cleanly, ok, msg, st_val in outcomes:

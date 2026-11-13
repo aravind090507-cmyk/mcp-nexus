@@ -638,6 +638,10 @@ class PersistentSessionManager:
     ) -> PersistentServerSession:
         """Retrieves or lazily instantiates a persistent session for the given server ID."""
         with cls._lock:
+            if cls._emergency_disabled:
+                raise RuntimeError(
+                    f"Persistent session instantiation rejected for '{server_id}': Global emergency kill switch is engaged."
+                )
             if server_id not in cls._sessions:
                 heartbeat = getattr(settings, "MCP_HEARTBEAT_INTERVAL_SECONDS", 30.0)
                 cls._sessions[server_id] = PersistentServerSession(
@@ -656,6 +660,8 @@ class PersistentSessionManager:
     @classmethod
     def get_existing_session(cls, server_id: str) -> Optional[PersistentServerSession]:
         with cls._lock:
+            if cls._emergency_disabled:
+                return None
             return cls._sessions.get(server_id)
 
     @classmethod
@@ -672,6 +678,10 @@ class PersistentSessionManager:
         timeout: float = 30.0
     ) -> Tuple[Dict[str, Any], float]:
         """High-level entry point to execute a tool on a persistent session."""
+        if cls.is_emergency_disabled():
+            raise RuntimeError(
+                f"Persistent session execution rejected for '{server_id}': Global emergency kill switch is engaged."
+            )
         session = cls.get_session(
             server_id=server_id,
             server_name=server_name,
