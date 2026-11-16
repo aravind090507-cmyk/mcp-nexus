@@ -127,6 +127,21 @@ def _multiprocess_executor_worker(db_url: str, cmd_queue: mp.Queue, res_queue: m
 # Helper for creating a clean test database environment (PostgreSQL or SQLite)
 # ==============================================================================
 
+@pytest.fixture(autouse=True)
+def cleanup_multiprocess_workers():
+    """Ensure no worker processes spawned via multiprocessing survive across test cases."""
+    yield
+    import multiprocessing as mp
+    for p in mp.active_children():
+        try:
+            p.terminate()
+            p.join(timeout=1.0)
+            if p.is_alive():
+                p.kill()
+                p.join(timeout=1.0)
+        except Exception:
+            pass
+
 @pytest.fixture(scope="module")
 def reliability_db_url():
     pg_url = os.getenv("POSTGRES_TEST_DATABASE_URL")

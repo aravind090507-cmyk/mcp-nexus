@@ -46,6 +46,14 @@ def cleanup_sessions():
     PersistentSessionManager.reset()
     yield
     PersistentSessionManager.reset()
+    if hasattr(os, "waitpid"):
+        try:
+            while True:
+                wpid, _ = os.waitpid(-1, os.WNOHANG)
+                if wpid <= 0:
+                    break
+        except Exception:
+            pass
 
 
 @pytest.mark.asyncio
@@ -326,6 +334,23 @@ async def test_11_zero_zombie_subprocesses():
     """Scenario 11: Subprocess cleanup guarantees zero zombie/orphan child processes."""
     proc = psutil.Process()
     
+    # Ensure clean process slate prior to testing zombie subprocess cleanup
+    for child in proc.children(recursive=True):
+        if "conhost" not in child.name().lower():
+            try:
+                child.kill()
+                child.wait(timeout=1.0)
+            except Exception:
+                pass
+    if hasattr(os, "waitpid"):
+        try:
+            while True:
+                wpid, _ = os.waitpid(-1, os.WNOHANG)
+                if wpid <= 0:
+                    break
+        except Exception:
+            pass
+
     await PersistentSessionManager.execute_tool(
         "srv-erp-zombie", "ERP", sys.executable, [ERP_SCRIPT], {}, os.getcwd(),
         "get_project_status", {"project_id": "PRJ-MUM-001"}
@@ -335,6 +360,15 @@ async def test_11_zero_zombie_subprocesses():
 
     await PersistentSessionManager.shutdown_all(timeout=3.0)
     await asyncio.sleep(0.5)
+
+    if hasattr(os, "waitpid"):
+        try:
+            while True:
+                wpid, _ = os.waitpid(-1, os.WNOHANG)
+                if wpid <= 0:
+                    break
+        except Exception:
+            pass
 
     children_after = [c for c in proc.children(recursive=True) if "conhost" not in c.name().lower()]
     assert len(children_after) == 0, f"Expected 0 child processes after shutdown, found: {children_after}"
