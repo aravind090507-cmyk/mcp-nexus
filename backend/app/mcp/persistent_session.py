@@ -880,27 +880,6 @@ class PersistentSessionManager:
         logger.info(f"Shutting down {len(sessions)} persistent MCP server session(s)...")
         tasks = [s.shutdown(timeout=timeout) for s in sessions]
         await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Ensure any remaining orphan child processes are safely reaped
-        try:
-            import psutil
-            current = psutil.Process()
-            for child in current.children(recursive=True):
-                if "conhost" not in child.name().lower():
-                    try:
-                        child.terminate()
-                        try:
-                            child.wait(timeout=1.0)
-                        except (psutil.TimeoutExpired, psutil.NoSuchProcess):
-                            try:
-                                child.kill()
-                            except (psutil.NoSuchProcess, Exception):
-                                pass
-                    except (psutil.NoSuchProcess, Exception):
-                        pass
-        except Exception:
-            pass
-
         logger.info("All persistent MCP server sessions cleanly shutdown.")
 
     @classmethod
