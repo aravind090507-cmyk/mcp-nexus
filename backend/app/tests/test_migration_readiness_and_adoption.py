@@ -265,6 +265,159 @@ def test_adoption_missing_table_rejected(tmp_path):
     eng2.dispose()
 
 
+def test_canonical_schema_contract_consistency():
+    """Verify that Base.metadata, initial Alembic migration, and CANONICAL_INITIAL_SCHEMA_TABLES 100% agree."""
+    import ast
+    from app.database.adoption import CANONICAL_INITIAL_SCHEMA_TABLES
+
+    # 1. Base.metadata must contain exactly the 13 canonical tables
+    assert set(Base.metadata.tables.keys()) == set(CANONICAL_INITIAL_SCHEMA_TABLES)
+
+    # 2. Parse Alembic initial migration file and extract created table names
+    mig_file = os.path.join(ROOT_DIR, "backend", "alembic", "versions", "2a307f9f14bc_initial_schema.py")
+    with open(mig_file, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+
+    mig_tables = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if getattr(node.func, "attr", "") == "create_table":
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    mig_tables.add(node.args[0].value)
+
+    assert mig_tables == set(CANONICAL_INITIAL_SCHEMA_TABLES), (
+        f"Migration schema divergence detected: {mig_tables ^ set(CANONICAL_INITIAL_SCHEMA_TABLES)}"
+    )
+
+
+def test_adoption_unexpected_extraneous_table_rejected(tmp_path):
+    """Verify that an existing database containing extraneous tables is rejected for adoption."""
+    test_db = tmp_path / f"adopt_extra_tbl_{uuid.uuid4().hex[:6]}.db"
+    db_url = f"sqlite:///{test_db}"
+
+    eng = create_engine(db_url)
+    Base.metadata.create_all(bind=eng)
+    with eng.connect() as conn:
+        conn.execute(text("CREATE TABLE unknown_foreign_table (id INT PRIMARY KEY, val TEXT);"))
+        conn.commit()
+    eng.dispose()
+
+    ok, msg = safely_adopt_existing_database(db_url)
+    assert not ok
+    assert "unexpected table(s) found" in msg.lower() or "structural differences detected" in msg.lower()
+
+
+def test_adoption_already_versioned_older_revision_rejected(tmp_path):
+    """Verify that a database already managed by Alembic at an older revision is rejected for stamp adoption."""
+    test_db = tmp_path / f"adopt_old_rev_{uuid.uuid4().hex[:6]}.db"
+    db_url = f"sqlite:///{test_db}"
+
+    eng = create_engine(db_url)
+    Base.metadata.create_all(bind=eng)
+    with eng.connect() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL);"))
+        conn.execute(text("INSERT INTO alembic_version VALUES ('older_legacy_rev_123');"))
+        conn.commit()
+    eng.dispose()
+
+    ok, msg = safely_adopt_existing_database(db_url)
+    assert not ok
+    assert "already managed by alembic" in msg.lower() or "upgrade" in msg.lower()
+
+
+def test_adoption_invalid_or_non_head_target_revision_rejected(tmp_path):
+    """Verify that specifying an unknown or non-head target revision is safely rejected."""
+    test_db = tmp_path / f"adopt_bad_target_{uuid.uuid4().hex[:6]}.db"
+    db_url = f"sqlite:///{test_db}"
+
+    eng = create_engine(db_url)
+    Base.metadata.create_all(bind=eng)
+    eng.dispose()
+
+    # Case 1: Unknown target revision
+    ok, msg = safely_adopt_existing_database(db_url, target_revision="completely_unknown_rev")
+    assert not ok
+    assert "unknown" in msg.lower()
+
+    # Case 2: Outdated/non-head target revision
+    ok2, msg2 = safely_adopt_existing_database(db_url, target_revision="fake_older_head")
+    assert not ok2
+
+
+def test_adoption_nullability_mismatch_rejected(tmp_path):
+    """Verify that a column nullability discrepancy causes adoption rejection."""
+    test_db = tmp_path / f"adopt_null_mismatch_{uuid.uuid4().hex[:6]}.db"
+    db_url = f"sqlite:///{test_db}"
+
+    eng = create_engine(db_url)
+    Base.metadata.create_all(bind=eng)
+    # Recreate organizations with null slug (which should be non-nullable)
+    with eng.connect() as conn:
+        conn.execute(text("DROP TABLE organizations;"))
+        conn.execute(text("CREATE TABLE organizations (id VARCHAR(36) PRIMARY KEY, name VARCHAR(255) NULL, slug VARCHAR(100) NULL);"))
+        conn.commit()
+    eng.dispose()
+
+    ok, msg = safely_adopt_existing_database(db_url)
+    assert not ok
+    assert "nullability mismatch" in msg.lower() or "missing column" in msg.lower()
+
+
+def test_adoption_live_postgresql():
+    """Verify safe adoption workflow against a live disposable PostgreSQL database."""
+    if not _is_pg_available():
+        pytest.skip("PostgreSQL test instance is unavailable.")
+
+    admin_url = POSTGRES_TEST_URL.rsplit('/', 1)[0] + '/postgres'
+    disp_db = f"adopt_pg_{uuid.uuid4().hex[:8]}"
+
+    eng_admin = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    with eng_admin.connect() as conn:
+        conn.execute(text(f"CREATE DATABASE {disp_db};"))
+    eng_admin.dispose()
+
+    disp_url = POSTGRES_TEST_URL.rsplit('/', 1)[0] + f"/{disp_db}"
+
+    try:
+        # Pre-populate schema using Base.metadata (simulating legacy pre-migration database)
+        eng_disp = create_engine(disp_url)
+        Base.metadata.create_all(bind=eng_disp)
+
+        # Insert test data to verify data retention
+        with eng_disp.connect() as conn:
+            conn.execute(text("INSERT INTO organizations (id, name, slug) VALUES ('pg-org-1', 'PG Alpha', 'pg-alpha');"))
+            conn.commit()
+        eng_disp.dispose()
+
+        # Adopt
+        ok, msg = safely_adopt_existing_database(disp_url)
+        assert ok, f"PostgreSQL adoption failed: {msg}"
+
+        # Verify alembic_version stamped and data intact
+        eng_check = create_engine(disp_url)
+        with eng_check.connect() as conn:
+            ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            org_name = conn.execute(text("SELECT name FROM organizations WHERE id = 'pg-org-1'")).scalar()
+        eng_check.dispose()
+
+        cfg = Config(os.path.join(ROOT_DIR, "alembic.ini"))
+        script = ScriptDirectory.from_config(cfg)
+        assert ver == script.get_current_head()
+        assert org_name == "PG Alpha"
+
+        # Verify idempotence on repeat adoption
+        ok_repeat, msg_repeat = safely_adopt_existing_database(disp_url)
+        assert ok_repeat
+        assert "already stamped" in msg_repeat
+
+    finally:
+        eng_admin = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+        with eng_admin.connect() as conn:
+            conn.execute(text(f"DROP DATABASE IF EXISTS {disp_db} WITH (FORCE);"))
+        eng_admin.dispose()
+
+
+
 def test_adoption_missing_column_rejected(tmp_path):
     """Verify that an existing database with a missing column is rejected for adoption."""
     test_db = tmp_path / f"adopt_missing_col_{uuid.uuid4().hex[:6]}.db"
@@ -289,3 +442,156 @@ def test_adoption_missing_column_rejected(tmp_path):
         insp = inspect(conn)
         assert "alembic_version" not in insp.get_table_names()
     eng2.dispose()
+
+
+def test_canonical_schema_contract_consistency():
+    """Verify that Base.metadata, initial Alembic migration, and CANONICAL_INITIAL_SCHEMA_TABLES 100% agree."""
+    import ast
+    from app.database.adoption import CANONICAL_INITIAL_SCHEMA_TABLES
+
+    # 1. Base.metadata must contain exactly the 13 canonical tables
+    assert set(Base.metadata.tables.keys()) == set(CANONICAL_INITIAL_SCHEMA_TABLES)
+
+    # 2. Parse Alembic initial migration file and extract created table names
+    mig_file = os.path.join(ROOT_DIR, "backend", "alembic", "versions", "2a307f9f14bc_initial_schema.py")
+    with open(mig_file, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+
+    mig_tables = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if getattr(node.func, "attr", "") == "create_table":
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    mig_tables.add(node.args[0].value)
+
+    assert mig_tables == set(CANONICAL_INITIAL_SCHEMA_TABLES), (
+        f"Migration schema divergence detected: {mig_tables ^ set(CANONICAL_INITIAL_SCHEMA_TABLES)}"
+    )
+
+
+def test_adoption_unexpected_extraneous_table_rejected(tmp_path):
+    """Verify that an existing database containing extraneous tables is rejected for adoption."""
+    test_db = tmp_path / f"adopt_extra_tbl_{uuid.uuid4().hex[:6]}.db"
+    db_url = f"sqlite:///{test_db}"
+
+    eng = create_engine(db_url)
+    Base.metadata.create_all(bind=eng)
+    with eng.connect() as conn:
+        conn.execute(text("CREATE TABLE unknown_foreign_table (id INT PRIMARY KEY, val TEXT);"))
+        conn.commit()
+    eng.dispose()
+
+    ok, msg = safely_adopt_existing_database(db_url)
+    assert not ok
+    assert "unexpected table(s) found" in msg.lower() or "structural differences detected" in msg.lower()
+
+
+def test_adoption_already_versioned_older_revision_rejected(tmp_path):
+    """Verify that a database already managed by Alembic at an older revision is rejected for stamp adoption."""
+    test_db = tmp_path / f"adopt_old_rev_{uuid.uuid4().hex[:6]}.db"
+    db_url = f"sqlite:///{test_db}"
+
+    eng = create_engine(db_url)
+    Base.metadata.create_all(bind=eng)
+    with eng.connect() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL);"))
+        conn.execute(text("INSERT INTO alembic_version VALUES ('older_legacy_rev_123');"))
+        conn.commit()
+    eng.dispose()
+
+    ok, msg = safely_adopt_existing_database(db_url)
+    assert not ok
+    assert "already managed by alembic" in msg.lower() or "upgrade" in msg.lower()
+
+
+def test_adoption_invalid_or_non_head_target_revision_rejected(tmp_path):
+    """Verify that specifying an unknown or non-head target revision is safely rejected."""
+    test_db = tmp_path / f"adopt_bad_target_{uuid.uuid4().hex[:6]}.db"
+    db_url = f"sqlite:///{test_db}"
+
+    eng = create_engine(db_url)
+    Base.metadata.create_all(bind=eng)
+    eng.dispose()
+
+    # Case 1: Unknown target revision
+    ok, msg = safely_adopt_existing_database(db_url, target_revision="completely_unknown_rev")
+    assert not ok
+    assert "unknown" in msg.lower()
+
+    # Case 2: Outdated/non-head target revision
+    ok2, msg2 = safely_adopt_existing_database(db_url, target_revision="fake_older_head")
+    assert not ok2
+
+
+def test_adoption_nullability_mismatch_rejected(tmp_path):
+    """Verify that a column nullability discrepancy causes adoption rejection."""
+    test_db = tmp_path / f"adopt_null_mismatch_{uuid.uuid4().hex[:6]}.db"
+    db_url = f"sqlite:///{test_db}"
+
+    eng = create_engine(db_url)
+    Base.metadata.create_all(bind=eng)
+    # Recreate organizations with null slug (which should be non-nullable)
+    with eng.connect() as conn:
+        conn.execute(text("DROP TABLE organizations;"))
+        conn.execute(text("CREATE TABLE organizations (id VARCHAR(36) PRIMARY KEY, name VARCHAR(255) NULL, slug VARCHAR(100) NULL);"))
+        conn.commit()
+    eng.dispose()
+
+    ok, msg = safely_adopt_existing_database(db_url)
+    assert not ok
+    assert "nullability mismatch" in msg.lower() or "missing column" in msg.lower()
+
+
+def test_adoption_live_postgresql():
+    """Verify safe adoption workflow against a live disposable PostgreSQL database."""
+    if not _is_pg_available():
+        pytest.skip("PostgreSQL test instance is unavailable.")
+
+    admin_url = POSTGRES_TEST_URL.rsplit('/', 1)[0] + '/postgres'
+    disp_db = f"adopt_pg_{uuid.uuid4().hex[:8]}"
+
+    eng_admin = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    with eng_admin.connect() as conn:
+        conn.execute(text(f"CREATE DATABASE {disp_db};"))
+    eng_admin.dispose()
+
+    disp_url = POSTGRES_TEST_URL.rsplit('/', 1)[0] + f"/{disp_db}"
+
+    try:
+        # Pre-populate schema using Base.metadata (simulating legacy pre-migration database)
+        eng_disp = create_engine(disp_url)
+        Base.metadata.create_all(bind=eng_disp)
+
+        # Insert test data to verify data retention
+        with eng_disp.connect() as conn:
+            conn.execute(text("INSERT INTO organizations (id, name, slug) VALUES ('pg-org-1', 'PG Alpha', 'pg-alpha');"))
+            conn.commit()
+        eng_disp.dispose()
+
+        # Adopt
+        ok, msg = safely_adopt_existing_database(disp_url)
+        assert ok, f"PostgreSQL adoption failed: {msg}"
+
+        # Verify alembic_version stamped and data intact
+        eng_check = create_engine(disp_url)
+        with eng_check.connect() as conn:
+            ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            org_name = conn.execute(text("SELECT name FROM organizations WHERE id = 'pg-org-1'")).scalar()
+        eng_check.dispose()
+
+        cfg = Config(os.path.join(ROOT_DIR, "alembic.ini"))
+        script = ScriptDirectory.from_config(cfg)
+        assert ver == script.get_current_head()
+        assert org_name == "PG Alpha"
+
+        # Verify idempotence on repeat adoption
+        ok_repeat, msg_repeat = safely_adopt_existing_database(disp_url)
+        assert ok_repeat
+        assert "already stamped" in msg_repeat
+
+    finally:
+        eng_admin = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+        with eng_admin.connect() as conn:
+            conn.execute(text(f"DROP DATABASE IF EXISTS {disp_db} WITH (FORCE);"))
+        eng_admin.dispose()
+

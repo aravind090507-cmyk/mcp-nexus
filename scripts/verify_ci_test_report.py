@@ -82,6 +82,10 @@ def verify_report(xml_path: str) -> tuple[bool, str]:
     except (ValueError, TypeError) as e:
         return False, f"CRITICAL CI ERROR: Invalid testsuite attributes in report: {e}"
 
+    # Reject negative numeric attributes
+    if total_tests < 0 or failures < 0 or errors < 0 or skipped < 0:
+        return False, "CRITICAL CI ERROR: Invalid testsuite attributes in report: negative counts detected."
+
     # Verify non-zero test execution
     all_testcase_elems = list(root.iter("testcase"))
     if total_tests <= 0 or len(all_testcase_elems) == 0:
@@ -101,12 +105,27 @@ def verify_report(xml_path: str) -> tuple[bool, str]:
     out.append(f"Total Duration       : {time_taken:.2f}s")
     out.append("-" * 80)
 
-    # Check for baseline count requirement
+    # Check for baseline count requirement and aggregate mismatch
     violations = []
+    if len(all_testcase_elems) != total_tests:
+        violations.append(
+            f"Aggregate test count mismatch: testsuite header declares {total_tests} tests, "
+            f"but document contains {len(all_testcase_elems)} testcase elements."
+        )
+
     if total_tests < MINIMUM_BASELINE_TEST_COUNT:
         violations.append(
             f"Test collection deficit: expected at least {MINIMUM_BASELINE_TEST_COUNT} tests, "
             f"but report only contains {total_tests}."
+        )
+
+    # Detect attribute spoofing (elements vs summary attributes)
+    actual_failures_count = sum(1 for tc in all_testcase_elems if tc.find("failure") is not None)
+    actual_errors_count = sum(1 for tc in all_testcase_elems if tc.find("error") is not None)
+    if actual_failures_count != failures or actual_errors_count != errors:
+        violations.append(
+            f"Attribute spoofing detected: header declares failures={failures}, errors={errors}, "
+            f"but XML elements contain {actual_failures_count} failure(s) and {actual_errors_count} error(s)."
         )
 
     # Track suite-specific execution and check for duplicate testcases

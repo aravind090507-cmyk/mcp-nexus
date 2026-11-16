@@ -26,6 +26,23 @@ if ROOT_DIR not in sys.path:
 from app.database.session import Base
 import app.models.all_models  # Registers all 13 models
 
+# Authoritative specification of the 13 domain tables comprising the initial schema baseline
+CANONICAL_INITIAL_SCHEMA_TABLES = frozenset({
+    "organizations",
+    "users",
+    "mcp_servers",
+    "mcp_tools",
+    "ai_agents",
+    "agent_server_assignments",
+    "agent_tool_permissions",
+    "approval_requests",
+    "execution_traces",
+    "security_policies",
+    "security_events",
+    "audit_logs",
+    "integration_configs",
+})
+
 
 def verify_schema_compatibility(db_url: str) -> Tuple[bool, str, Dict[str, Any]]:
     """
@@ -33,12 +50,20 @@ def verify_schema_compatibility(db_url: str) -> Tuple[bool, str, Dict[str, Any]]
     against Base.metadata before any adoption or stamping can take place.
     
     Verifies:
-    1. All 13 required tables exist.
-    2. All expected columns, column types, and nullabilities exist.
-    3. Primary keys match expected PK definitions.
-    4. Foreign keys match expected FK relations.
-    5. No missing tables, missing columns, or incompatible constraints.
+    1. All 13 canonical domain tables exist.
+    2. No unexpected extraneous tables exist.
+    3. All expected columns, column types, and nullabilities exist.
+    4. Primary keys match expected PK definitions.
+    5. Foreign keys match expected FK relations.
+    6. No structural discrepancies via Alembic compare_metadata.
     """
+    # Enforce that ORM metadata matches the canonical initial schema contract
+    if set(Base.metadata.tables.keys()) != set(CANONICAL_INITIAL_SCHEMA_TABLES):
+        raise RuntimeError(
+            f"Schema contract violation: Base.metadata tables {sorted(Base.metadata.tables.keys())} "
+            f"do not match canonical contract {sorted(CANONICAL_INITIAL_SCHEMA_TABLES)}"
+        )
+
     connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
     eng = create_engine(db_url, connect_args=connect_args)
     details = {}
@@ -47,12 +72,18 @@ def verify_schema_compatibility(db_url: str) -> Tuple[bool, str, Dict[str, Any]]
         with eng.connect() as conn:
             insp = inspect(conn)
             existing_tables = set(insp.get_table_names())
-            expected_tables = set(Base.metadata.tables.keys())
+            expected_tables = set(CANONICAL_INITIAL_SCHEMA_TABLES)
 
             # Check 1: Table completeness
             missing_tables = expected_tables - existing_tables
             if missing_tables:
                 return False, f"Incompatible schema: missing required table(s): {sorted(missing_tables)}", details
+
+            # Check 1b: Reject unexpected tables (excluding alembic_version and sqlite internal tables)
+            allowed_tables = expected_tables | {"alembic_version", "sqlite_sequence"}
+            unexpected_tables = existing_tables - allowed_tables
+            if unexpected_tables:
+                return False, f"Incompatible schema: unexpected table(s) found: {sorted(unexpected_tables)}", details
 
             # Check 2: Column, PK and FK verification for each table
             for t_name in sorted(expected_tables):
@@ -63,6 +94,15 @@ def verify_schema_compatibility(db_url: str) -> Tuple[bool, str, Dict[str, Any]]
                 missing_cols = set(expected_cols.keys()) - set(actual_cols.keys())
                 if missing_cols:
                     return False, f"Incompatible schema: table '{t_name}' is missing column(s): {sorted(missing_cols)}", details
+
+                # Column nullability check
+                for c_name, c_obj in expected_cols.items():
+                    act_col = actual_cols.get(c_name)
+                    if act_col and act_col.get("nullable") != c_obj.nullable:
+                        return False, (
+                            f"Incompatible schema: table '{t_name}', column '{c_name}' nullability mismatch "
+                            f"(actual nullable={act_col.get('nullable')} vs expected {c_obj.nullable})"
+                        ), details
 
                 # Primary key check
                 pk_info = insp.get_pk_constraint(t_name)
@@ -103,15 +143,22 @@ def verify_schema_compatibility(db_url: str) -> Tuple[bool, str, Dict[str, Any]]
         eng.dispose()
 
 
-def safely_adopt_existing_database(db_url: str, ini_path: Optional[str] = None) -> Tuple[bool, str]:
+def safely_adopt_existing_database(
+    db_url: str,
+    ini_path: Optional[str] = None,
+    target_revision: Optional[str] = None,
+) -> Tuple[bool, str]:
     """
     Safely adopts a pre-existing database by verifying full schema compatibility
-    prior to executing 'alembic stamp head'.
+    prior to executing 'alembic stamp <target_head>'.
     
     Guarantees:
     - Never stamps an incompatible, partial, or corrupted schema.
+    - Validates target revision against repository heads.
+    - Rejects databases that already have older or unknown Alembic revisions (use upgrade instead).
     - Preserves all pre-existing application data without DDL drops or changes.
-    - Safe and idempotent if already stamped at head.
+    - Idempotent if already stamped at head.
+    - Atomic and non-destructive: fails fast without modifying database if checks fail.
     """
     ini_file = ini_path or os.path.join(ROOT_DIR, "alembic.ini")
     if not os.path.exists(ini_file):
@@ -120,17 +167,55 @@ def safely_adopt_existing_database(db_url: str, ini_path: Optional[str] = None) 
     cfg = Config(ini_file)
     cfg.set_main_option("sqlalchemy.url", db_url)
     script = ScriptDirectory.from_config(cfg)
-    expected_head = script.get_current_head()
+    
+    # Validate repository migration heads
+    heads = script.get_heads()
+    if len(heads) > 1:
+        return False, f"Adoption rejected: Repository contains multiple migration heads: {heads}. Resolve migration branches first."
+    if not heads:
+        return False, "Adoption rejected: Repository contains zero migration heads."
 
-    # Step 1: Check if already at head
+    head_rev = heads[0]
+
+    # Validate target revision if explicitly supplied
+    if target_revision is not None:
+        try:
+            rev_obj = script.get_revision(target_revision)
+            if rev_obj is None:
+                return False, f"Adoption rejected: Target revision '{target_revision}' is unknown in migration history."
+        except Exception as e:
+            return False, f"Adoption rejected: Target revision '{target_revision}' is invalid: {e}"
+
+        if target_revision != head_rev:
+            return False, (
+                f"Adoption rejected: Target revision '{target_revision}' is not the current migration head ('{head_rev}'). "
+                "Adoption only supports stamping the head revision corresponding to Base.metadata."
+            )
+
+    target_head = target_revision or head_rev
+
+    # Step 1: Check existing alembic_version table state in database
     connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
     eng = create_engine(db_url, connect_args=connect_args)
     try:
         with eng.connect() as conn:
-            ctx = MigrationContext.configure(conn)
-            current_heads = set(ctx.get_current_heads())
-            if expected_head in current_heads:
-                return True, f"Database is already stamped at current head revision '{expected_head}'."
+            insp = inspect(conn)
+            table_names = set(insp.get_table_names())
+            if "alembic_version" in table_names:
+                ctx = MigrationContext.configure(conn)
+                current_heads = set(ctx.get_current_heads())
+                if current_heads == {target_head}:
+                    return True, f"Database is already stamped at current head revision '{target_head}'."
+                elif len(current_heads) > 1:
+                    return False, f"Adoption rejected: Database has multiple divergent revisions recorded: {sorted(current_heads)}."
+                elif len(current_heads) == 1:
+                    existing_rev = list(current_heads)[0]
+                    return False, (
+                        f"Adoption rejected: Database is already managed by Alembic at revision '{existing_rev}'. "
+                        "Stamping over an existing revision is unsafe; use 'alembic upgrade head' instead."
+                    )
+                else:
+                    return False, "Adoption rejected: Database has an empty 'alembic_version' table (no revision recorded)."
     finally:
         eng.dispose()
 
@@ -139,8 +224,8 @@ def safely_adopt_existing_database(db_url: str, ini_path: Optional[str] = None) 
     if not compatible:
         return False, f"Adoption rejected: {reason}"
 
-    # Step 3: Stamp to head
-    command.stamp(cfg, "head")
+    # Step 3: Stamp to target head
+    command.stamp(cfg, target_head)
 
     # Step 4: Verify stamp succeeded
     eng = create_engine(db_url, connect_args=connect_args)
@@ -148,9 +233,9 @@ def safely_adopt_existing_database(db_url: str, ini_path: Optional[str] = None) 
         with eng.connect() as conn:
             ctx = MigrationContext.configure(conn)
             current_heads = set(ctx.get_current_heads())
-            if expected_head not in current_heads:
-                return False, f"Adoption verification failed: expected stamped revision '{expected_head}', got {current_heads}"
+            if target_head not in current_heads:
+                return False, f"Adoption verification failed: expected stamped revision '{target_head}', got {current_heads}"
     finally:
         eng.dispose()
 
-    return True, f"Successfully adopted existing database and stamped to head revision '{expected_head}'."
+    return True, f"Successfully adopted existing database and stamped to head revision '{target_head}'."

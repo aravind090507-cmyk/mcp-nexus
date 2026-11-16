@@ -121,8 +121,9 @@ def check_database_readiness():
                     "Run 'alembic upgrade head' before starting in Production."
                 )
 
-            # Also verify all core tables exist in database
-            required_tables = {"organizations", "users", "mcp_servers", "mcp_tools"}
+            # Also verify all 13 canonical domain tables exist in database
+            from app.database.adoption import CANONICAL_INITIAL_SCHEMA_TABLES
+            required_tables = set(CANONICAL_INITIAL_SCHEMA_TABLES)
             missing = required_tables - existing_tables
             if missing:
                 raise RuntimeError(

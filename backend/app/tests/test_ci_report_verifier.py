@@ -219,3 +219,58 @@ def test_valid_complete_report_accepted(tmp_path):
     valid, msg = verify_report(str(p))
     assert valid, f"Expected valid report to pass, but failed with:\n{msg}"
     assert "CI GATE PASSED" in msg
+
+
+def test_negative_numeric_attributes_rejected(tmp_path):
+    xml_str = '<testsuite name="pytest" tests="-5" errors="0" failures="0" skipped="0" time="0.0" />'
+    p = tmp_path / "negative.xml"
+    p.write_text(xml_str, encoding="utf-8")
+    valid, msg = verify_report(str(p))
+    assert not valid
+    assert "negative counts detected" in msg.lower()
+
+
+def test_misleading_aggregate_count_mismatch_rejected(tmp_path):
+    # Header says 250 tests, but only 21 critical testcases exist
+    xml_str = _build_valid_report_xml(extra_cases=0)
+    # Tamper header tests count to 250
+    xml_str = xml_str.replace('tests="21"', 'tests="250"')
+    p = tmp_path / "misleading_aggregate.xml"
+    p.write_text(xml_str, encoding="utf-8")
+    valid, msg = verify_report(str(p))
+    assert not valid
+    assert "aggregate test count mismatch" in msg.lower()
+
+
+def test_attribute_spoofing_rejected(tmp_path):
+    # Header claims failures="0", but testcase contains a <failure> element
+    xml_str = _build_valid_report_xml(extra_cases=215)
+    # Inject failure element inside a testcase without updating failures="0" header
+    xml_str = xml_str.replace(
+        'name="test_dummy_0" time="0.01" />',
+        'name="test_dummy_0" time="0.01"><failure message="spoofed">error</failure></testcase>'
+    )
+    p = tmp_path / "spoofed.xml"
+    p.write_text(xml_str, encoding="utf-8")
+    valid, msg = verify_report(str(p))
+    assert not valid
+    assert "attribute spoofing detected" in msg.lower()
+
+
+def test_report_containing_only_unrelated_tests_rejected(tmp_path):
+    # 250 tests, but none from the critical suites
+    cases = [
+        f'  <testcase classname="backend.app.tests.test_random" file="backend/app/tests/test_random.py" name="test_unrelated_{i}" time="0.01" />'
+        for i in range(240)
+    ]
+    xml_str = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<testsuite name="pytest" tests="240" errors="0" failures="0" skipped="0" time="5.0">\n'
+        + "\n".join(cases)
+        + "\n</testsuite>"
+    )
+    p = tmp_path / "unrelated.xml"
+    p.write_text(xml_str, encoding="utf-8")
+    valid, msg = verify_report(str(p))
+    assert not valid
+    assert "missing expected test case" in msg.lower()
