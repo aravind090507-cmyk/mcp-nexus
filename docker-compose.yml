@@ -9,9 +9,11 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - ENVIRONMENT=Production
+      - ENVIRONMENT=Development
       - DATABASE_URL=sqlite:///./mcp_nexus.db
       - SECRET_KEY=mcp-nexus-enterprise-vault-supersecret-key-2026-xyz
+      - DEBUG=True
+      - WORKERS=1
       - LLM_PROVIDER=DEMO_DETERMINISTIC
       - LLM_MODEL=gemini-1.5-pro
     volumes:

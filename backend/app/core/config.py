@@ -2,9 +2,75 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional, Dict, Any
 import os
 import sys
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 VALID_ENVIRONMENTS = ("Development", "Testing", "Staging", "Production")
+
+def _parse_worker_count() -> int:
+    """
+    Safely resolves the effective worker count by inspecting WORKERS and WEB_CONCURRENCY.
+    Guarantees:
+    - Empty strings raise RuntimeError.
+    - Non-numeric strings raise RuntimeError.
+    - Zero or negative integers raise RuntimeError.
+    - When both are set, selects the maximum to ensure safety checks cannot be bypassed.
+    - Defaults to 1 if neither is defined.
+    """
+    candidates = []
+    for var_name in ("WORKERS", "WEB_CONCURRENCY"):
+        val = os.getenv(var_name)
+        if val is not None:
+            stripped = val.strip()
+            if not stripped:
+                raise RuntimeError(
+                    f"CRITICAL CONFIGURATION ERROR: Invalid worker configuration: '{var_name}' cannot be empty."
+                )
+            try:
+                num = int(stripped)
+            except ValueError:
+                raise RuntimeError(
+                    f"CRITICAL CONFIGURATION ERROR: Invalid worker configuration: '{var_name}' must be an integer, got '{val}'."
+                )
+            if num <= 0:
+                raise RuntimeError(
+                    f"CRITICAL CONFIGURATION ERROR: Invalid worker configuration: '{var_name}' must be a positive integer, got {num}."
+                )
+            candidates.append(num)
+
+    if not candidates:
+        return 1
+    return max(candidates)
+
+def _is_sqlite_url(db_url: str) -> bool:
+    """Determines if a database URL points to an SQLite engine."""
+    clean = db_url.strip().lower()
+    if clean.startswith("sqlite:") or clean.startswith("sqlite+"):
+        return True
+    try:
+        parsed = urlparse(db_url)
+        return parsed.scheme.lower() in ("sqlite", "sqlite+pysqlite", "sqlite+aiosqlite")
+    except Exception:
+        return "sqlite" in clean
+
+def _is_dev_or_staging_db(db_url: str) -> bool:
+    """Determines if a database URL points to development or staging database files."""
+    try:
+        parsed = urlparse(db_url)
+        path = parsed.path.lower()
+        base = os.path.basename(path)
+        if base in ("mcp_nexus.db", "mcp_nexus_staging.db", "mcp_nexus_staging"):
+            return True
+        if base.startswith("mcp_nexus") and ("staging" in base or base.endswith(".db")):
+            return True
+        if parsed.scheme.startswith("sqlite"):
+            raw_path = db_url.replace("sqlite:///", "").replace("sqlite://", "").lower()
+            raw_base = os.path.basename(raw_path)
+            return raw_base in ("mcp_nexus.db", "mcp_nexus_staging.db", "mcp_nexus_staging") or (raw_base.startswith("mcp_nexus") and ("staging" in raw_base or raw_base.endswith(".db")))
+        return False
+    except Exception:
+        clean = db_url.lower()
+        return "mcp_nexus.db" in clean or "staging" in clean
 
 def _resolve_and_load_environment() -> str:
     """
@@ -90,9 +156,9 @@ def _resolve_and_load_environment() -> str:
             load_dotenv(prod_file, override=False)
 
         # Multi-worker deployment safety check (Requirement B & 7.3)
-        workers = int(os.getenv("WORKERS", os.getenv("WEB_CONCURRENCY", "1")))
+        workers = _parse_worker_count()
         prod_db = os.getenv("DATABASE_URL", "")
-        if workers > 1 and "sqlite" in prod_db.lower():
+        if workers > 1 and _is_sqlite_url(prod_db):
             raise RuntimeError(
                 f"CRITICAL CONFIGURATION ERROR: Multi-worker deployment (WORKERS={workers}) cannot use SQLite database. "
                 "A clustered database (e.g., PostgreSQL) is strictly required for multi-worker concurrency."
@@ -105,9 +171,9 @@ def _resolve_and_load_environment() -> str:
                 "enterprise secret of at least 32 characters."
             )
 
-        if not prod_db or "sqlite" in prod_db.lower():
+        if not prod_db or _is_sqlite_url(prod_db):
             raise RuntimeError("CRITICAL CONFIGURATION ERROR: Production environment cannot use SQLite database.")
-        if "mcp_nexus.db" in prod_db.lower() or "staging" in prod_db.lower():
+        if _is_dev_or_staging_db(prod_db):
             raise RuntimeError(
                 "CRITICAL CONFIGURATION ERROR: Production environment cannot use development or staging databases."
             )
@@ -139,9 +205,9 @@ def _resolve_and_load_environment() -> str:
                 break
 
     # General multi-worker SQLite check across all environments
-    gen_workers = int(os.getenv("WORKERS", os.getenv("WEB_CONCURRENCY", "1")))
+    gen_workers = _parse_worker_count()
     gen_db = os.getenv("DATABASE_URL", "")
-    if gen_workers > 1 and "sqlite" in gen_db.lower():
+    if gen_workers > 1 and _is_sqlite_url(gen_db):
         raise RuntimeError(
             f"CRITICAL CONFIGURATION ERROR: Multi-worker deployment (WORKERS={gen_workers}) cannot use SQLite database. "
             "A clustered database (e.g., PostgreSQL) is strictly required for multi-worker concurrency."
@@ -160,7 +226,7 @@ class Settings(BaseSettings):
     # Environment
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", _active_env)
     DEBUG: bool = os.getenv("DEBUG", "False" if os.getenv("ENVIRONMENT", _active_env).capitalize() == "Production" else "True").lower() == "true"
-    WORKERS: int = int(os.getenv("WORKERS", os.getenv("WEB_CONCURRENCY", "1")))
+    WORKERS: int = _parse_worker_count()
 
     # Security
     SECRET_KEY: str = os.getenv("SECRET_KEY", "mcp-nexus-enterprise-vault-supersecret-key-2026-xyz")
@@ -221,8 +287,10 @@ class Settings(BaseSettings):
             raise RuntimeError(f"Startup check failed: Invalid ENVIRONMENT '{self.ENVIRONMENT}'.")
 
         # Multi-worker deployment validation across all environments
-        workers = int(getattr(self, "WORKERS", os.getenv("WORKERS", os.getenv("WEB_CONCURRENCY", "1"))))
-        if workers > 1 and "sqlite" in self.DATABASE_URL.lower():
+        workers = getattr(self, "WORKERS", None)
+        if workers is None:
+            workers = _parse_worker_count()
+        if workers > 1 and _is_sqlite_url(self.DATABASE_URL):
             raise RuntimeError(
                 f"Startup check failed: Multi-worker deployment (WORKERS={workers}) cannot use SQLite."
             )
@@ -240,9 +308,9 @@ class Settings(BaseSettings):
         if env == "Production":
             if not self.SECRET_KEY or len(self.SECRET_KEY) < 32 or any(k in self.SECRET_KEY.lower() for k in ("supersecret", "xyz", "vault", "default", "changeme")):
                 raise RuntimeError("Startup check failed: Insecure SECRET_KEY in Production.")
-            if "sqlite" in self.DATABASE_URL.lower():
+            if _is_sqlite_url(self.DATABASE_URL):
                 raise RuntimeError("Startup check failed: SQLite is strictly forbidden in Production.")
-            if "mcp_nexus.db" in self.DATABASE_URL.lower() or "staging" in self.DATABASE_URL.lower():
+            if _is_dev_or_staging_db(self.DATABASE_URL):
                 raise RuntimeError("Startup check failed: Production cannot use development or staging databases.")
             if self.DEBUG:
                 raise RuntimeError("Startup check failed: DEBUG mode cannot be enabled in Production.")

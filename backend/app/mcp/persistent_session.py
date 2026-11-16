@@ -729,3 +729,6 @@ class PersistentSessionManager:
                 if s._owning_loop and s._owning_loop.is_running():
                     asyncio.run_coroutine_threadsafe(s.shutdown(timeout=1.0), s._owning_loop)
             cls._sessions.clear()
+            cls._emergency_disabled = False
+            cls._emergency_disabled_at = None
+            cls._emergency_reason = None

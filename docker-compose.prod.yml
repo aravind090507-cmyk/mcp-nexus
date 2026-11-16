@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: mcp-nexus-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mcp_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ChangeMeSecurePostgresPassword2026}
+      POSTGRES_DB: ${POSTGRES_DB:-mcp_nexus_prod}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mcp_admin} -d ${POSTGRES_DB:-mcp_nexus_prod}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: mcp-nexus-backend-prod
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=Production
+      - DEBUG=False
+      - WORKERS=${WORKERS:-4}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-mcp_admin}:${POSTGRES_PASSWORD:-ChangeMeSecurePostgresPassword2026}@postgres:5432/${POSTGRES_DB:-mcp_nexus_prod}
+      - SECRET_KEY=${SECRET_KEY:-ChangeMeToA32CharacterEnterpriseProductionKey999}
+      - LLM_PROVIDER=${LLM_PROVIDER:-DEMO_DETERMINISTIC}
+      - LLM_MODEL=${LLM_MODEL:-gemini-1.5-pro}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - ENABLE_PERSISTENT_MCP_SESSIONS=False
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: mcp-nexus-frontend-prod
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -1,90 +1,134 @@
 # MCP NEXUS — ENTERPRISE DEPLOYMENT & PRODUCTION RUNBOOK
 
-**Target Environment:** Docker Compose / Kubernetes / On-Premise Enterprise Infrastructure  
-**Stack:** FastAPI (Python 3.11+ / 3.14), PostgreSQL 15+, React 19 + TypeScript + Vite, Nginx  
+**Project:** MCP NEXUS — CONNECT. ORCHESTRATE. GOVERN.
+**Release:** v1.0.0-rc1
+**Target Environments:** Docker Compose / Kubernetes / On-Premise Enterprise Infrastructure
+**Stack:** FastAPI (Python 3.11+ / 3.14), PostgreSQL 15+ (Clustered), React 19 + TypeScript + Vite, Nginx
 
 ---
 
-## 1. Quickstart (Docker Compose)
+## 1. Quickstart Architecture
 
-### 1.1 Prerequisites
-- Docker Engine 24+ & Docker Compose v2+
-- Git
+MCP NEXUS provides two deployment topologies:
+1. **Local Evaluation & Development:** Single-worker FastAPI with local SQLite database (`mcp_nexus.db`) and Vite dev server.
+2. **Enterprise Production Clustered:** Multi-worker Uvicorn (`WORKERS >= 2`) with clustered PostgreSQL 15+ and Nginx static frontend.
 
-### 1.2 Booting the Control Plane
+---
+
+## 2. Local Evaluation (Standard Run)
+
+### 2.1 Native Python & Node.js
+
+#### Backend Setup
 ```bash
-# Clone the repository
-git clone https://github.com/aravind/mcp-nexus.git
-cd mcp-nexus
+# 1. Install backend dependencies
+pip install -r backend/requirements.txt
 
-# Start all services (Database, Backend API, Frontend Nginx)
+# 2. Run backend test suite (197 verified tests)
+python -m pytest backend/app/tests/ -v
+
+# 3. Start FastAPI backend (Port 8000)
+uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
+```
+
+#### Frontend Setup
+```bash
+# In a separate terminal:
+cd frontend
+
+# 1. Install dependencies
+npm install
+
+# 2. Verify TypeScript and production build
+npx tsc --noEmit
+npm run build
+
+# 3. Start Vite development server
+npm run dev
+# Accessible at http://localhost:5173
+```
+
+---
+
+## 3. Docker Compose Deployment
+
+### 3.1 Local Zero-Config Evaluation
+```bash
+# Start local development stack with SQLite (Port 5173 -> Frontend, Port 8000 -> Backend)
 docker compose up -d --build
 
-# Verify container health
+# Verify container status
 docker compose ps
 ```
 
-### 1.3 Service URLs & Ports
-- **Frontend Dashboard:** `http://localhost:5173`
-- **Backend API & Swagger Docs:** `http://localhost:8000/docs`
-- **PostgreSQL Database:** `localhost:5432`
+### 3.2 Production Deployment with PostgreSQL
+```bash
+# Launch production cluster with PostgreSQL 15 and multi-worker FastAPI
+docker compose -f docker-compose.prod.yml up -d --build
+
+# Check database readiness and logs
+docker compose -f docker-compose.prod.yml logs -f backend
+```
 
 ---
 
-## 2. Environment Variables Configuration
+## 4. Production Environment Configuration (`.env.production`)
 
-Create a `.env` file in the root directory:
+Production environments strictly fail closed if invalid or insecure settings are detected.
 
 ```env
-# Application Core
-PROJECT_NAME="MCP NEXUS"
-TAGLINE="CONNECT. ORCHESTRATE. GOVERN."
-ENVIRONMENT="Production"
+# Mandatory Profile
+ENVIRONMENT=Production
 DEBUG=False
+WORKERS=4
 
-# Cryptography & Token Security
-SECRET_KEY="mcp-nexus-enterprise-vault-supersecret-key-2026-xyz"
-ALGORITHM="HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES=1440
+# Cryptographic Token Key (must be >= 32 chars, non-trivial)
+SECRET_KEY=Enterprise-Class-Production-Secret-Key-Random-2026-X99
 
-# Database Connection (PostgreSQL for Production, SQLite for Local Dev)
-DATABASE_URL="postgresql://mcp_user:mcp_password@db:5432/mcp_nexus"
+# Clustered Database (SQLite is strictly forbidden in Production and when WORKERS > 1)
+DATABASE_URL=postgresql://mcp_admin:SecureProductionPassword2026@pg-cluster:5432/mcp_nexus_prod
 
-# LLM Gateway Configuration
-LLM_PROVIDER="DEMO_DETERMINISTIC" # Options: GEMINI, OPENAI, ANTHROPIC, DEMO_DETERMINISTIC
-LLM_API_KEY=""
-LLM_MODEL="gemini-1.5-pro"
+# LLM Gateway
+LLM_PROVIDER=DEMO_DETERMINISTIC
+LLM_MODEL=gemini-1.5-pro
+LLM_API_KEY=
 
-# CORS Configuration
-BACKEND_CORS_ORIGINS=["http://localhost:5173","http://localhost:3000","http://127.0.0.1:5173"]
+# Persistent Sessions (Disabled by default in Production)
+ENABLE_PERSISTENT_MCP_SESSIONS=False
+PERSISTENT_MCP_SERVERS=
 ```
 
 ---
 
-## 3. Verification & Health Monitoring
+## 5. Enterprise Default Accounts
 
-### 3.1 Backend Healthcheck
-```bash
-curl -f http://localhost:8000/health
-# Output: {"status":"healthy","version":"1.0.0","environment":"Production"}
-```
-
-### 3.2 Running the Integration Test Suite
-```bash
-# Run pytest directly with all 23 verified integration tests
-python -m pytest backend/app/tests/test_backend.py -v
-```
-
----
-
-## 4. Default Enterprise User Credentials
-
-Out of the box, MCP NEXUS seeds 5 least-privilege enterprise accounts:
+The canonical database is seeded with 5 least-privilege enterprise accounts:
 
 | Email | Password | Role | Permissions |
 | :--- | :--- | :--- | :--- |
-| `admin@mcpnexus.io` | `admin123` | `SUPER_ADMIN` | Complete governance, server management, dual approvals, policy creation |
-| `ops@mcpnexus.io` | `admin123` | `ADMIN` | Server connection, approval review, audit logs, monitoring |
-| `dev@mcpnexus.io` | `admin123` | `DEVELOPER` | Tool execution, playground testing, server registration |
-| `operator@mcpnexus.io` | `admin123` | `OPERATOR` | Agent orchestration, read-only telemetry, operational workflows |
-| `auditor@mcpnexus.io` | `admin123` | `VIEWER` | Read-only compliance audit trail and metrics inspection |
+| `admin@mcp-nexus.enterprise` | `NexusAdmin@2026` | `SUPER_ADMIN` | Full governance, server registration, approval authority, policy creation |
+| `ops.lead@mcp-nexus.enterprise` | `NexusAdmin@2026` | `ADMIN` | Server management, approval review, audit logs, monitoring |
+| `dev.arch@mcp-nexus.enterprise` | `NexusAdmin@2026` | `DEVELOPER` | Tool execution, playground testing, server registration |
+| `operator.site@mcp-nexus.enterprise` | `NexusAdmin@2026` | `OPERATOR` | Agent orchestration, read-only telemetry, operational workflows |
+| `audit.viewer@mcp-nexus.enterprise` | `NexusAdmin@2026` | `VIEWER` | Read-only compliance audit trail and metrics inspection |
+
+---
+
+## 6. Verification & Health Monitoring
+
+### 6.1 System Health Endpoint
+```bash
+curl -f http://localhost:8000/health
+# Returns: {"status":"HEALTHY","environment":"...","database":"CONNECTED","governance_engine":"ACTIVE",...}
+```
+
+### 6.2 Full Test Suite Execution
+```bash
+# Complete backend test suite (197 tests)
+python -m pytest backend/app/tests/ -v
+
+# Frontend typecheck & build
+cd frontend
+npx tsc --noEmit
+npm run build
+```
