@@ -55,7 +55,6 @@ jobs:
       - name: Execute Complete Backend Test Suite
         env:
           POSTGRES_TEST_DATABASE_URL: postgresql://postgres:postgrespassword2026@localhost:5432/mcp_nexus_test
-          DATABASE_URL: sqlite:///./mcp_nexus.db
           SECRET_KEY: ci-test-secret-key-32-characters-long-enterprise
           ENVIRONMENT: Development
         run: |

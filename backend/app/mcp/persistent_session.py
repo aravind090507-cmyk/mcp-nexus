@@ -540,6 +540,22 @@ class PersistentServerSession:
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
 
+        if self._pid:
+            try:
+                import psutil
+                if psutil.pid_exists(self._pid):
+                    p = psutil.Process(self._pid)
+                    p.terminate()
+                    try:
+                        p.wait(timeout=1.0)
+                    except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                        try:
+                            p.kill()
+                        except (psutil.NoSuchProcess, Exception):
+                            pass
+            except Exception:
+                pass
+
 
 class PersistentSessionManager:
     """

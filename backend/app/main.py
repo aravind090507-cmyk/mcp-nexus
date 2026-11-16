@@ -279,7 +279,9 @@ async def startup_seed():
         logger.info("Initializing enterprise seed data for MCP NEXUS...")
 
         # 1. Organization
+        primary_org_id = os.getenv("MCP_PRIMARY_ORG_ID", "abbc6079-36ce-4b73-b8ee-0796f7de5821")
         org = Organization(
+            id=primary_org_id,
             name="Larsen & Toubro Heavy Civil & Digital IC",
             slug="lt-heavy-civil",
             description="L&T Infrastructure Control Center & AI Operations Plane",
