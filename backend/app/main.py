@@ -32,29 +32,113 @@ logger = logging.getLogger("mcp-nexus")
 
 def check_database_readiness():
     """
-    Verifies that required database schema prerequisites exist before application startup.
-    Fails fast in Production if migrations have not been applied.
+    Verifies database connectivity and authoritative schema readiness before application startup.
+    In Production:
+    - Verifies connectivity.
+    - Verifies existence and accessibility of Alembic version table.
+    - Verifies database current revision matches expected application head.
+    - Rejects missing, unmigrated, outdated, unknown, or multi-head revision states.
+    - Strictly forbids Base.metadata.create_all() or silent schema alteration.
+    In Development:
+    - Verifies connectivity.
+    - If tables are missing, initializes them via Base.metadata.create_all(bind=engine).
     """
-    from sqlalchemy import inspect
+    from sqlalchemy import inspect, text
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from alembic.migration import MigrationContext
+
+    # 1. Connectivity check
     try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as e:
+        logger.error(f"Database connectivity check failed: {e}")
+        raise RuntimeError(f"CRITICAL STARTUP ERROR: Database is unreachable: {e}") from e
+
+    env_name = settings.ENVIRONMENT.capitalize()
+
+    # 2. Production strict revision verification
+    if env_name == "Production":
+        with engine.connect() as conn:
+            insp = inspect(conn)
+            existing_tables = set(insp.get_table_names())
+
+            # Check for version table existence
+            version_table = "alembic_version"
+            if version_table not in existing_tables:
+                raise RuntimeError(
+                    f"CRITICAL STARTUP ERROR: Alembic version table '{version_table}' is missing. "
+                    "Database has not been initialized with schema migrations. "
+                    "Run 'alembic upgrade head' before starting in Production."
+                )
+
+            # Determine application expected heads
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            ini_path = os.path.join(repo_root, "alembic.ini")
+            if not os.path.exists(ini_path):
+                ini_path = os.path.join(os.path.dirname(__file__), "..", "alembic.ini")
+            cfg = Config(ini_path)
+            script = ScriptDirectory.from_config(cfg)
+            expected_heads = set(script.get_heads())
+
+            # Check database actual current revision
+            context = MigrationContext.configure(conn)
+            current_heads = set(context.get_current_heads())
+
+            if not current_heads:
+                raise RuntimeError(
+                    "CRITICAL STARTUP ERROR: Database Alembic version table is empty (no migration revision recorded). "
+                    "Run 'alembic upgrade head' before starting in Production."
+                )
+
+            if len(current_heads) > 1:
+                raise RuntimeError(
+                    f"CRITICAL STARTUP ERROR: Database has multiple unexpected migration heads: {sorted(current_heads)}. "
+                    "Resolve migration branching before starting in Production."
+                )
+
+            current_rev = list(current_heads)[0]
+
+            # Verify revision is known in migration history
+            try:
+                rev_obj = script.get_revision(current_rev)
+                if rev_obj is None:
+                    raise RuntimeError(
+                        f"CRITICAL STARTUP ERROR: Database revision '{current_rev}' is unknown to application migration history."
+                    )
+            except Exception as e:
+                raise RuntimeError(
+                    f"CRITICAL STARTUP ERROR: Database revision '{current_rev}' is unknown or invalid: {e}"
+                ) from e
+
+            # Verify revision matches expected head
+            if current_heads != expected_heads:
+                known_revisions = [r.revision for r in script.walk_revisions()]
+                state_desc = "behind" if current_rev in known_revisions else "inconsistent with"
+                raise RuntimeError(
+                    f"CRITICAL STARTUP ERROR: Database revision '{current_rev}' is {state_desc} expected head {sorted(expected_heads)}. "
+                    "Run 'alembic upgrade head' before starting in Production."
+                )
+
+            # Also verify all core tables exist in database
+            required_tables = {"organizations", "users", "mcp_servers", "mcp_tools"}
+            missing = required_tables - existing_tables
+            if missing:
+                raise RuntimeError(
+                    f"CRITICAL STARTUP ERROR: Database schema missing required tables {sorted(missing)} "
+                    f"despite reported revision '{current_rev}'. Run 'alembic upgrade head'."
+                )
+
+    elif env_name == "Development":
         with engine.connect() as conn:
             insp = inspect(conn)
             existing_tables = set(insp.get_table_names())
         required_tables = {"organizations", "users", "mcp_servers", "mcp_tools"}
         missing = required_tables - existing_tables
         if missing:
-            if settings.ENVIRONMENT.upper() == "PRODUCTION":
-                raise RuntimeError(
-                    f"CRITICAL STARTUP ERROR: Database schema prerequisites are missing: {sorted(missing)}. "
-                    "In Production, database schema must be initialized via explicit migrations: 'alembic upgrade head'."
-                )
-            else:
-                logger.info(f"Non-production environment: initializing missing tables {sorted(missing)} for local development/testing.")
-                Base.metadata.create_all(bind=engine)
-    except Exception as e:
-        if settings.ENVIRONMENT.upper() == "PRODUCTION":
-            raise
-        logger.warning(f"Database readiness check encountered warning: {e}")
+            logger.info(f"Non-production environment: initializing missing tables {sorted(missing)} for local development/testing.")
+            Base.metadata.create_all(bind=engine)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
