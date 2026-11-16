@@ -507,6 +507,7 @@ class PersistentServerSession:
         if self._state in (SessionLifecycleState.SHUTTING_DOWN, SessionLifecycleState.CLOSED):
             return
 
+        pid_to_kill = self._pid
         self._state = SessionLifecycleState.SHUTTING_DOWN
         logger.info(f"[{self.server_name}] Shutting down persistent session...")
 
@@ -525,6 +526,23 @@ class PersistentServerSession:
                 self._owning_loop.call_soon_threadsafe(self._owning_loop.stop)
             self._worker_thread.join(timeout=2.0)
             self._worker_thread = None
+
+        # Hard kill the session's specific subprocess if it is still alive
+        if pid_to_kill:
+            try:
+                import psutil
+                if psutil.pid_exists(pid_to_kill):
+                    p = psutil.Process(pid_to_kill)
+                    p.terminate()
+                    try:
+                        p.wait(timeout=1.0)
+                    except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                        try:
+                            p.kill()
+                        except (psutil.NoSuchProcess, Exception):
+                            pass
+            except Exception:
+                pass
 
         self._state = SessionLifecycleState.CLOSED
         logger.info(f"[{self.server_name}] Shutdown complete.")
