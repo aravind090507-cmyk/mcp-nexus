@@ -26,13 +26,41 @@ import datetime
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("mcp-nexus")
 
-# Create database tables
-Base.metadata.create_all(bind=engine)
+# Database schema management:
+# Base.metadata.create_all(bind=engine) removed to prevent DDL on module import (Phase 15D.4.4).
+# Production schema migrations must be applied explicitly via Alembic ('alembic upgrade head').
+
+def check_database_readiness():
+    """
+    Verifies that required database schema prerequisites exist before application startup.
+    Fails fast in Production if migrations have not been applied.
+    """
+    from sqlalchemy import inspect
+    try:
+        with engine.connect() as conn:
+            insp = inspect(conn)
+            existing_tables = set(insp.get_table_names())
+        required_tables = {"organizations", "users", "mcp_servers", "mcp_tools"}
+        missing = required_tables - existing_tables
+        if missing:
+            if settings.ENVIRONMENT.upper() == "PRODUCTION":
+                raise RuntimeError(
+                    f"CRITICAL STARTUP ERROR: Database schema prerequisites are missing: {sorted(missing)}. "
+                    "In Production, database schema must be initialized via explicit migrations: 'alembic upgrade head'."
+                )
+            else:
+                logger.info(f"Non-production environment: initializing missing tables {sorted(missing)} for local development/testing.")
+                Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        if settings.ENVIRONMENT.upper() == "PRODUCTION":
+            raise
+        logger.warning(f"Database readiness check encountered warning: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Strict fail-closed enterprise startup validation (Task B2)
     settings.validate_startup_configuration()
+    check_database_readiness()
     await startup_seed()
     if getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False) and getattr(settings, "PERSISTENT_MCP_PREWARM_ON_STARTUP", False):
         try:
@@ -121,28 +149,6 @@ async def startup_seed():
     MCPConnectionManager.reset_all_circuits()
     db = SessionLocal()
     try:
-        # Schema migration check: Ensure dual-control columns exist
-        from sqlalchemy import text
-        try:
-            with engine.connect() as conn:
-                # Check for approval_requests dual control columns
-                cols_result = conn.execute(text("PRAGMA table_info(approval_requests)"))
-                existing_cols = [row[1] for row in cols_result.fetchall()]
-                new_cols = [
-                    ("first_approver_id", "VARCHAR(36)"),
-                    ("first_approved_at", "DATETIME"),
-                    ("second_approver_id", "VARCHAR(36)"),
-                    ("second_approved_at", "DATETIME"),
-                    ("expires_at", "DATETIME"),
-                    ("requires_dual_approval", "BOOLEAN DEFAULT 0")
-                ]
-                for col_name, col_type in new_cols:
-                    if col_name not in existing_cols:
-                        conn.execute(text(f"ALTER TABLE approval_requests ADD COLUMN {col_name} {col_type}"))
-                conn.commit()
-        except Exception as e:
-            logger.debug(f"Schema auto-migration check: {e}")
-
         # Production administrator credential security & idempotent bootstrap
         if settings.ENVIRONMENT.upper() == "PRODUCTION":
             existing_admin = db.query(User).filter(User.role == RoleEnum.SUPER_ADMIN.value).first()

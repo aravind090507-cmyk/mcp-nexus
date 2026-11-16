@@ -340,6 +340,15 @@ SessionLocal = _SessionLocalProxy()
 Base = declarative_base()
 
 
+def init_db(target_engine=None):
+    """
+    Explicitly initializes all database tables using SQLAlchemy declarative metadata.
+    Intended for testing fixtures and explicit development setup.
+    """
+    eng = target_engine or engine
+    Base.metadata.create_all(bind=eng)
+
+
 def reset_database_engine(new_db_url: Optional[str] = None):
     """
     Dynamically rebinds the SQLAlchemy engine and session factory to a specified database URL
