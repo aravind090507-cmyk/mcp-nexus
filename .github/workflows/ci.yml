@@ -65,9 +65,9 @@ jobs:
         run: |
           python scripts/verify_ci_test_report.py backend-test-report.xml
 
-      - name: Verify Canonical SQLite Invariance
+      - name: Verify Database Integrity Contract & Clean Checkout Hygiene
         run: |
-          python -c "import hashlib; h = hashlib.sha256(open('mcp_nexus.db', 'rb').read()).hexdigest(); assert h == '86ecebf633cf6c871dfcaebe5a308a75f3b12c1e8f0e758142e7945a4f86636f', f'Canonical DB modified: {h}'"
+          python scripts/verify_database_integrity_contract.py
 
   frontend-build:
     name: Frontend Build & Typecheck

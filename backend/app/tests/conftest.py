@@ -34,7 +34,24 @@ if os.path.exists(baseline_candidate):
 elif os.path.exists(dev_db_path):
     baseline_src = dev_db_path
 else:
-    raise RuntimeError("CRITICAL ARCHITECTURAL FAILURE: Baseline database template missing. Tests cannot proceed safely.")
+    # Clean-checkout / CI fallback: Synthesize pristine baseline database template
+    logger.info("Baseline database binary not found in clean checkout; synthesizing pristine template.")
+    synth_dir = tempfile.mkdtemp(prefix="mcp_nexus_ci_baseline_")
+    synth_path = os.path.abspath(os.path.join(synth_dir, "clean_ci_baseline.db"))
+    from sqlalchemy import create_engine
+    from app.database.session import Base, reset_database_engine
+    import app.models.all_models
+    import asyncio
+    from app.main import startup_seed
+
+    _synth_eng = create_engine(f"sqlite:///{synth_path}")
+    Base.metadata.create_all(bind=_synth_eng)
+    _synth_eng.dispose()
+
+    reset_database_engine(f"sqlite:///{synth_path}")
+    asyncio.run(startup_seed())
+    reset_database_engine()
+    baseline_src = synth_path
 
 # Record baseline hash of dev_db_path to verify invariance
 _initial_dev_db_hash = None
