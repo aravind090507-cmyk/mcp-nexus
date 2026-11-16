@@ -188,6 +188,13 @@ def _resolve_and_load_environment() -> str:
                 "CRITICAL CONFIGURATION ERROR: Persistent MCP sessions are not authorized in Production during Phase 15D.4.1."
             )
 
+        # Production Administrator Bootstrap Password Validation
+        bootstrap_pw = os.getenv("BOOTSTRAP_ADMIN_PASSWORD")
+        if bootstrap_pw is not None:
+            pw = bootstrap_pw.strip()
+            if len(pw) < 12 or any(k in pw.lower() for k in ("nexusadmin", "admin123", "password", "changeme", "supersecret")):
+                raise RuntimeError("CRITICAL CONFIGURATION ERROR: BOOTSTRAP_ADMIN_PASSWORD does not meet enterprise complexity requirements (must be at least 12 characters and not contain default keywords).")
+
         # Wildcard persistent MCP session allowlist is strictly forbidden in Production
         persistent_servers = os.getenv("PERSISTENT_MCP_SERVERS", "")
         if persistent_servers.strip() == "*":
@@ -232,6 +239,8 @@ class Settings(BaseSettings):
     SECRET_KEY: str = os.getenv("SECRET_KEY", "mcp-nexus-enterprise-vault-supersecret-key-2026-xyz")
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+    BOOTSTRAP_ADMIN_EMAIL: str = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "admin@mcp-nexus.enterprise")
+    BOOTSTRAP_ADMIN_PASSWORD: Optional[str] = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", None)
 
     # Database: Default to sqlite file for zero-config out-of-the-box run, easily switched to Postgres via DATABASE_URL
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./mcp_nexus.db")
@@ -320,6 +329,10 @@ class Settings(BaseSettings):
                 raise RuntimeError("Startup check failed: Wildcard PERSISTENT_MCP_SERVERS='*' forbidden in Production.")
             if self.LLM_PROVIDER in ("OPENAI", "ANTHROPIC", "GEMINI") and not self.LLM_API_KEY:
                 raise RuntimeError(f"Startup check failed: LLM_API_KEY is required in Production when LLM_PROVIDER is '{self.LLM_PROVIDER}'.")
+            if self.BOOTSTRAP_ADMIN_PASSWORD is not None:
+                pw = self.BOOTSTRAP_ADMIN_PASSWORD.strip()
+                if len(pw) < 12 or any(k in pw.lower() for k in ("nexusadmin", "admin123", "password", "changeme", "supersecret")):
+                    raise RuntimeError("Startup check failed: BOOTSTRAP_ADMIN_PASSWORD does not meet enterprise complexity requirements (must be at least 12 characters and not contain default keywords).")
 
         return {
             "environment": env,

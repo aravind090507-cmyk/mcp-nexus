@@ -130,7 +130,8 @@ async def emergency_disable_persistent_sessions(
     """
     from app.mcp.persistent_session import PersistentSessionManager
     res = await PersistentSessionManager.emergency_disable(
-        reason=f"Emergency disable invoked by {current_user.full_name} ({current_user.email})"
+        reason=f"Emergency disable invoked by {current_user.full_name} ({current_user.email})",
+        actor_email=current_user.email
     )
     AuditService.record(
         db, "EMERGENCY_DISABLE_PERSISTENT_SESSIONS", "SERVER", "SYSTEM",
@@ -148,7 +149,7 @@ def emergency_enable_persistent_sessions(
     Disengages emergency kill switch, restoring persistent session capability for enabled servers.
     """
     from app.mcp.persistent_session import PersistentSessionManager
-    res = PersistentSessionManager.emergency_enable()
+    res = PersistentSessionManager.emergency_enable(actor_email=current_user.email)
     AuditService.record(
         db, "EMERGENCY_ENABLE_PERSISTENT_SESSIONS", "SERVER", "SYSTEM",
         user_name=current_user.full_name, role=current_user.role,

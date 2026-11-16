@@ -549,27 +549,130 @@ class PersistentSessionManager:
     and graceful shutdown coordination across all enterprise MCP servers.
     """
     _sessions: Dict[str, PersistentServerSession] = {}
-    _lock = threading.Lock()
+    _lock = threading.RLock()
     _emergency_disabled: bool = False
     _emergency_disabled_at: Optional[str] = None
     _emergency_reason: Optional[str] = None
 
     @classmethod
-    def is_emergency_disabled(cls) -> bool:
-        """Returns True if the operator emergency kill switch is currently engaged."""
-        return cls._emergency_disabled
+    def _fetch_authoritative_emergency_state(cls) -> Tuple[str, Optional[str], Optional[str]]:
+        """
+        Queries the central database for authoritative emergency kill switch state.
+        Returns:
+            ("ENGAGED", disabled_at, reason) if kill switch is active in DB.
+            ("DISENGAGED", None, None) if kill switch is explicitly disengaged in DB.
+            ("NONE", None, None) if no kill switch record exists in DB.
+            ("UNREACHABLE", None, "Authoritative store unreachable (Fail-Closed)") if DB error occurs.
+        """
+        try:
+            from app.database.session import SessionLocal
+            from app.models.all_models import IntegrationConfig
+            db = SessionLocal()
+            try:
+                config = db.query(IntegrationConfig).filter(
+                    IntegrationConfig.name == "GLOBAL_EMERGENCY_KILL_SWITCH"
+                ).first()
+                if not config:
+                    return "NONE", None, None
+                if config.status == "ENGAGED":
+                    stats = config.stats or {}
+                    return "ENGAGED", stats.get("disabled_at"), stats.get("reason", "Global emergency kill switch engaged")
+                elif config.status == "DISENGAGED":
+                    return "DISENGAGED", None, None
+                return "NONE", None, None
+            finally:
+                db.close()
+        except Exception as e:
+            sanitized_err = sanitize_log_data(str(e))
+            logger.error(f"Failed to query authoritative emergency state (failing closed): {sanitized_err}")
+            return "UNREACHABLE", None, "Authoritative store unreachable (Fail-Closed)"
 
     @classmethod
-    async def emergency_disable(cls, reason: str = "Operator manual kill switch activated") -> Dict[str, Any]:
+    def is_emergency_disabled(cls) -> bool:
+        """
+        Returns True if the operator emergency kill switch is currently engaged.
+        Synchronizes with the authoritative database store across worker processes.
+        Fails closed (returns True) if the authoritative store is unreachable.
+        """
+        state, disabled_at, reason = cls._fetch_authoritative_emergency_state()
+        if state == "ENGAGED":
+            with cls._lock:
+                cls._emergency_disabled = True
+                cls._emergency_disabled_at = disabled_at
+                cls._emergency_reason = reason
+            return True
+        elif state == "UNREACHABLE":
+            with cls._lock:
+                cls._emergency_disabled = True
+                cls._emergency_reason = reason
+            return True
+        elif state == "DISENGAGED":
+            with cls._lock:
+                cls._emergency_disabled = False
+                cls._emergency_disabled_at = None
+                cls._emergency_reason = None
+            return False
+        else:  # "NONE"
+            with cls._lock:
+                return cls._emergency_disabled
+
+    @classmethod
+    async def emergency_disable(
+        cls,
+        reason: str = "Operator manual kill switch activated",
+        actor_email: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Emergency Kill Switch:
-        Immediately disables all persistent sessions and shuts down running subprocesses.
+        Immediately disables all persistent sessions, persists state to authoritative store,
+        and shuts down running subprocesses.
         Forces 100% of traffic to route to legacy per-call transport without server restart.
         """
         import datetime
-        cls._emergency_disabled = True
-        cls._emergency_disabled_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        cls._emergency_reason = reason
+        from app.database.session import SessionLocal
+        from app.models.all_models import IntegrationConfig, utc_now
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with cls._lock:
+            cls._emergency_disabled = True
+            cls._emergency_disabled_at = now_iso
+            cls._emergency_reason = reason
+
+        # Persist to central database for cross-worker synchronization
+        try:
+            db = SessionLocal()
+            try:
+                config = db.query(IntegrationConfig).filter(
+                    IntegrationConfig.name == "GLOBAL_EMERGENCY_KILL_SWITCH"
+                ).first()
+                if not config:
+                    config = IntegrationConfig(
+                        name="GLOBAL_EMERGENCY_KILL_SWITCH",
+                        system_type="GOVERNANCE",
+                        vendor="MCP_NEXUS",
+                        status="ENGAGED",
+                        stats={
+                            "reason": reason,
+                            "disabled_at": now_iso,
+                            "actor": actor_email or "System"
+                        },
+                        last_sync=utc_now()
+                    )
+                    db.add(config)
+                else:
+                    config.status = "ENGAGED"
+                    config.stats = {
+                        "reason": reason,
+                        "disabled_at": now_iso,
+                        "actor": actor_email or "System"
+                    }
+                    config.last_sync = utc_now()
+                db.commit()
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Failed to persist emergency kill switch to authoritative store: {sanitize_log_data(str(e))}")
+
         logger.warning(f"EMERGENCY KILL SWITCH ENGAGED: {reason}. Shutting down all persistent sessions.")
         await cls.shutdown_all(timeout=2.0)
         return {
@@ -580,11 +683,51 @@ class PersistentSessionManager:
         }
 
     @classmethod
-    def emergency_enable(cls) -> Dict[str, Any]:
-        """Restores persistent session capability after emergency shutdown."""
-        cls._emergency_disabled = False
-        cls._emergency_disabled_at = None
-        cls._emergency_reason = None
+    def emergency_enable(cls, actor_email: Optional[str] = None) -> Dict[str, Any]:
+        """Restores persistent session capability after emergency shutdown across all workers."""
+        import datetime
+        from app.database.session import SessionLocal
+        from app.models.all_models import IntegrationConfig, utc_now
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with cls._lock:
+            cls._emergency_disabled = False
+            cls._emergency_disabled_at = None
+            cls._emergency_reason = None
+
+        # Persist to central database for cross-worker synchronization
+        try:
+            db = SessionLocal()
+            try:
+                config = db.query(IntegrationConfig).filter(
+                    IntegrationConfig.name == "GLOBAL_EMERGENCY_KILL_SWITCH"
+                ).first()
+                if not config:
+                    config = IntegrationConfig(
+                        name="GLOBAL_EMERGENCY_KILL_SWITCH",
+                        system_type="GOVERNANCE",
+                        vendor="MCP_NEXUS",
+                        status="DISENGAGED",
+                        stats={
+                            "disengaged_at": now_iso,
+                            "actor": actor_email or "System"
+                        },
+                        last_sync=utc_now()
+                    )
+                    db.add(config)
+                else:
+                    config.status = "DISENGAGED"
+                    config.stats = {
+                        "disengaged_at": now_iso,
+                        "actor": actor_email or "System"
+                    }
+                    config.last_sync = utc_now()
+                db.commit()
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Failed to persist emergency disengagement to authoritative store: {sanitize_log_data(str(e))}")
+
         logger.info("Emergency kill switch disengaged. Persistent sessions re-enabled.")
         return {
             "emergency_disabled": False,
@@ -612,7 +755,7 @@ class PersistentSessionManager:
 
         return {
             "global_flag_enabled": getattr(settings, "ENABLE_PERSISTENT_MCP_SESSIONS", False),
-            "emergency_disabled": cls._emergency_disabled,
+            "emergency_disabled": cls.is_emergency_disabled(),
             "emergency_disabled_at": cls._emergency_disabled_at,
             "emergency_reason": cls._emergency_reason,
             "total_sessions": len(sessions),
@@ -638,7 +781,7 @@ class PersistentSessionManager:
     ) -> PersistentServerSession:
         """Retrieves or lazily instantiates a persistent session for the given server ID."""
         with cls._lock:
-            if cls._emergency_disabled:
+            if cls.is_emergency_disabled():
                 raise RuntimeError(
                     f"Persistent session instantiation rejected for '{server_id}': Global emergency kill switch is engaged."
                 )
@@ -660,7 +803,7 @@ class PersistentSessionManager:
     @classmethod
     def get_existing_session(cls, server_id: str) -> Optional[PersistentServerSession]:
         with cls._lock:
-            if cls._emergency_disabled:
+            if cls.is_emergency_disabled():
                 return None
             return cls._sessions.get(server_id)
 
@@ -722,13 +865,39 @@ class PersistentSessionManager:
         logger.info("All persistent MCP server sessions cleanly shutdown.")
 
     @classmethod
-    def reset(cls):
-        """Synchronous reset for test harness isolation."""
+    def reset(cls, clear_emergency: bool = False):
+        """
+        Synchronous reset of local session pool.
+        Does NOT clear the global emergency kill switch by default (clear_emergency=False)
+        to prevent worker pool recycles from inadvertent disengagement.
+        Use test_harness_reset() or clear_emergency=True in isolated test fixtures.
+        """
         with cls._lock:
             for s in list(cls._sessions.values()):
                 if s._owning_loop and s._owning_loop.is_running():
                     asyncio.run_coroutine_threadsafe(s.shutdown(timeout=1.0), s._owning_loop)
             cls._sessions.clear()
-            cls._emergency_disabled = False
-            cls._emergency_disabled_at = None
-            cls._emergency_reason = None
+            if clear_emergency:
+                cls._emergency_disabled = False
+                cls._emergency_disabled_at = None
+                cls._emergency_reason = None
+
+    @classmethod
+    def test_harness_reset(cls):
+        """Dedicated test harness reset that clears both local sessions and emergency state in memory & DB."""
+        cls.reset(clear_emergency=True)
+        try:
+            from app.database.session import SessionLocal
+            from app.models.all_models import IntegrationConfig
+            db = SessionLocal()
+            try:
+                config = db.query(IntegrationConfig).filter(
+                    IntegrationConfig.name == "GLOBAL_EMERGENCY_KILL_SWITCH"
+                ).first()
+                if config:
+                    db.delete(config)
+                    db.commit()
+            finally:
+                db.close()
+        except Exception:
+            pass

@@ -237,13 +237,21 @@ def test_emergency_shutdown_prevents_get_session():
         PersistentSessionManager._emergency_disabled = False
 
 
-def test_persistent_session_manager_reset_clears_emergency_state():
-    """PersistentSessionManager.reset() must clear emergency disabled state for test harness isolation."""
+def test_persistent_session_manager_reset_preserves_emergency_state():
+    """PersistentSessionManager.reset() preserves emergency disabled state by default; test_harness_reset() clears it."""
     PersistentSessionManager._emergency_disabled = True
     PersistentSessionManager._emergency_disabled_at = "2026-11-16T10:00:00Z"
     PersistentSessionManager._emergency_reason = "Test Kill"
 
-    PersistentSessionManager.reset()
+    # Default reset preserves emergency shutdown state
+    PersistentSessionManager.reset(clear_emergency=False)
+
+    assert PersistentSessionManager.is_emergency_disabled() is True
+    assert PersistentSessionManager._emergency_disabled_at == "2026-11-16T10:00:00Z"
+    assert PersistentSessionManager._emergency_reason == "Test Kill"
+
+    # Dedicated test harness reset clears both session pool and emergency state
+    PersistentSessionManager.test_harness_reset()
 
     assert PersistentSessionManager.is_emergency_disabled() is False
     assert PersistentSessionManager._emergency_disabled_at is None

@@ -100,11 +100,20 @@ PERSISTENT_MCP_SERVERS=
 
 ---
 
-## 5. Enterprise Default Accounts
+## 5. Administrator Security & Credential Management
 
-The canonical database is seeded with 5 least-privilege enterprise accounts:
+### 5.1 Production Administrator Bootstrap
+In `Production` (`ENVIRONMENT=Production`), default credentials and demo users are **strictly prohibited and never provisioned**. Initial administrator provisioning is performed via environment bootstrap:
 
-| Email | Password | Role | Permissions |
+1. Configure `BOOTSTRAP_ADMIN_PASSWORD` (minimum 12 characters, non-trivial, no default keywords) in `.env.production`.
+2. Optionally configure `BOOTSTRAP_ADMIN_EMAIL` (default: `admin@mcp-nexus.enterprise`).
+3. On first startup, the platform idempotently provisions the Super Admin with a bcrypt-hashed password.
+4. Subsequent restarts detect the existing Super Admin and preserve credentials without modification.
+
+### 5.2 Development & Evaluation Accounts
+In local `Development` mode only, the database is pre-seeded with 5 least-privilege demo accounts:
+
+| Email | Password (Dev Only) | Role | Permissions |
 | :--- | :--- | :--- | :--- |
 | `admin@mcp-nexus.enterprise` | `NexusAdmin@2026` | `SUPER_ADMIN` | Full governance, server registration, approval authority, policy creation |
 | `ops.lead@mcp-nexus.enterprise` | `NexusAdmin@2026` | `ADMIN` | Server management, approval review, audit logs, monitoring |
@@ -124,8 +133,11 @@ curl -f http://localhost:8000/health
 
 ### 6.2 Full Test Suite Execution
 ```bash
-# Complete backend test suite (197 tests)
+# Complete backend test suite (209 passing tests)
 python -m pytest backend/app/tests/ -v
+
+# Run PostgreSQL Integration Suite (requires live PostgreSQL instance)
+POSTGRES_TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/mcp_test python -m pytest backend/app/tests/test_postgresql_integration.py -v
 
 # Frontend typecheck & build
 cd frontend

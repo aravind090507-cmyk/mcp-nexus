@@ -219,7 +219,19 @@ def ensure_isolated_database_per_test(request):
         logger.critical(f"PRE-TEST ISOLATION BREACH in {request.node.name}: {reason}")
         pytest.fail(f"PRE-TEST DATABASE ISOLATION BREACH in '{request.node.name}': {reason}")
 
+    try:
+        from app.mcp.persistent_session import PersistentSessionManager
+        PersistentSessionManager.test_harness_reset()
+    except Exception:
+        pass
+
     yield
+
+    try:
+        from app.mcp.persistent_session import PersistentSessionManager
+        PersistentSessionManager.test_harness_reset()
+    except Exception:
+        pass
 
     # --- Post-Test Verification ---
     is_valid, reason = verify_exact_database_isolation(request.node.name)

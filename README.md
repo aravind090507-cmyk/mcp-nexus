@@ -190,9 +190,11 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 ---
 
-## Enterprise Default Accounts
+## Enterprise Evaluation & Development Accounts
 
-The database comes pre-seeded with 5 least-privilege enterprise accounts:
+> **SECURITY NOTICE:** Default demo accounts are provisioned exclusively in `Development` mode. In `Production` (`ENVIRONMENT=Production`), default accounts are strictly blocked and never seeded. Initial production administrator provisioning requires setting `BOOTSTRAP_ADMIN_PASSWORD` (min. 12 characters, complex) in your environment.
+
+In local development/evaluation mode, the database is pre-seeded with 5 least-privilege demo accounts:
 
 | Email | Password | Role | Permissions |
 | :--- | :--- | :--- | :--- |
@@ -201,6 +203,16 @@ The database comes pre-seeded with 5 least-privilege enterprise accounts:
 | `dev.arch@mcp-nexus.enterprise` | `NexusAdmin@2026` | `DEVELOPER` | Tool execution, playground testing, server registration |
 | `operator.site@mcp-nexus.enterprise` | `NexusAdmin@2026` | `OPERATOR` | Agent orchestration, read-only telemetry, operational workflows |
 | `audit.viewer@mcp-nexus.enterprise` | `NexusAdmin@2026` | `VIEWER` | Read-only compliance audit trail and metrics inspection |
+
+---
+
+## Production Administrator Bootstrap & Credential Rotation
+
+For initial production deployment:
+1. Provide `BOOTSTRAP_ADMIN_PASSWORD` and optionally `BOOTSTRAP_ADMIN_EMAIL` in `.env.production`.
+2. On initial startup, the Super Admin account is provisioned idempotently with a bcrypt-hashed credential.
+3. Subsequent server restarts verify the existing Super Admin and never overwrite existing credentials.
+4. Passwords and credentials are automatically redacted from all application logs and telemetry.
 
 ---
 

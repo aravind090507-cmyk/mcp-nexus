@@ -143,7 +143,44 @@ async def startup_seed():
         except Exception as e:
             logger.debug(f"Schema auto-migration check: {e}")
 
-        # Check if already seeded
+        # Production administrator credential security & idempotent bootstrap
+        if settings.ENVIRONMENT.upper() == "PRODUCTION":
+            existing_admin = db.query(User).filter(User.role == RoleEnum.SUPER_ADMIN.value).first()
+            if existing_admin:
+                logger.info("Production Super Admin account verified; existing credentials preserved.")
+                return
+
+            bootstrap_password = settings.BOOTSTRAP_ADMIN_PASSWORD
+            if not bootstrap_password:
+                logger.error("Production startup halted: BOOTSTRAP_ADMIN_PASSWORD is required for initial production setup.")
+                raise RuntimeError("BOOTSTRAP_ADMIN_PASSWORD is required for initial production setup.")
+
+            org = db.query(Organization).first()
+            if not org:
+                org = Organization(
+                    name="Enterprise Production",
+                    slug="enterprise-prod",
+                    description="MCP Nexus Production Control Plane",
+                    tier="ENTERPRISE_MISSION_CRITICAL"
+                )
+                db.add(org)
+                db.commit()
+                db.refresh(org)
+
+            admin_user = User(
+                organization_id=org.id,
+                email=settings.BOOTSTRAP_ADMIN_EMAIL,
+                full_name="Production Administrator",
+                hashed_password=get_password_hash(bootstrap_password),
+                role=RoleEnum.SUPER_ADMIN.value,
+                department="Platform Operations"
+            )
+            db.add(admin_user)
+            db.commit()
+            logger.info(f"Production Super Admin successfully bootstrapped ({settings.BOOTSTRAP_ADMIN_EMAIL}); credentials secured.")
+            return
+
+        # Check if already seeded (Development / Staging / Test)
         if db.query(Organization).first():
             logger.info("Database already seeded.")
             return
@@ -418,5 +455,7 @@ async def startup_seed():
     except Exception as e:
         logger.error(f"Error during startup seed: {e}")
         db.rollback()
+        if settings.ENVIRONMENT.upper() == "PRODUCTION":
+            raise
     finally:
         db.close()
