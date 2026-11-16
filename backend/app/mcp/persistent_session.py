@@ -295,6 +295,7 @@ class PersistentServerSession:
                         ]
                         if post_pids:
                             self._pid = post_pids[0]
+                            PersistentSessionManager.register_pid(self._pid)
                     except Exception:
                         pass
 
@@ -567,10 +568,21 @@ class PersistentSessionManager:
     and graceful shutdown coordination across all enterprise MCP servers.
     """
     _sessions: Dict[str, PersistentServerSession] = {}
+    _active_pids: set = set()
     _lock = threading.RLock()
     _emergency_disabled: bool = False
     _emergency_disabled_at: Optional[str] = None
     _emergency_reason: Optional[str] = None
+
+    @classmethod
+    def register_pid(cls, pid: int):
+        with cls._lock:
+            cls._active_pids.add(pid)
+
+    @classmethod
+    def unregister_pid(cls, pid: int):
+        with cls._lock:
+            cls._active_pids.discard(pid)
 
     @classmethod
     def _fetch_authoritative_emergency_state(cls) -> Tuple[str, Optional[str], Optional[str]]:
@@ -873,13 +885,31 @@ class PersistentSessionManager:
         with cls._lock:
             sessions = list(cls._sessions.values())
             cls._sessions.clear()
+            pids_to_clean = list(cls._active_pids)
+            cls._active_pids.clear()
 
-        if not sessions:
-            return
+        if sessions:
+            logger.info(f"Shutting down {len(sessions)} persistent MCP server session(s)...")
+            tasks = [s.shutdown(timeout=timeout) for s in sessions]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-        logger.info(f"Shutting down {len(sessions)} persistent MCP server session(s)...")
-        tasks = [s.shutdown(timeout=timeout) for s in sessions]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # Forcefully terminate and reap any surviving persistent session subprocesses
+        for pid in pids_to_clean:
+            try:
+                import psutil
+                if psutil.pid_exists(pid):
+                    p = psutil.Process(pid)
+                    p.terminate()
+                    try:
+                        p.wait(timeout=1.0)
+                    except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                        try:
+                            p.kill()
+                        except (psutil.NoSuchProcess, Exception):
+                            pass
+            except Exception:
+                pass
+
         logger.info("All persistent MCP server sessions cleanly shutdown.")
 
     @classmethod
