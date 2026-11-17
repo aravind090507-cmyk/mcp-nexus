@@ -111,6 +111,7 @@ class PersistentServerSession:
         self._consecutive_failures = 0
         self._circuit_tripped_at: Optional[float] = None
         self._pid: Optional[int] = None
+        self._proc_create_time: Optional[float] = None
 
         # Observability & Metrics
         self._pending_requests: int = 0
@@ -295,7 +296,12 @@ class PersistentServerSession:
                         ]
                         if post_pids:
                             self._pid = post_pids[0]
-                            PersistentSessionManager.register_pid(self._pid)
+                            try:
+                                import psutil
+                                self._proc_create_time = psutil.Process(self._pid).create_time()
+                            except Exception:
+                                self._proc_create_time = None
+                            PersistentSessionManager.register_pid(self._pid, self._proc_create_time)
                     except Exception:
                         pass
 
@@ -511,21 +517,30 @@ class PersistentServerSession:
         self._state = SessionLifecycleState.SHUTTING_DOWN
         logger.info(f"[{self.server_name}] Shutting down persistent session...")
 
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
         if self._owning_loop and self._owning_loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(self._async_shutdown(timeout), self._owning_loop)
-            try:
-                await asyncio.wrap_future(fut)
-            except Exception as e:
-                logger.warning(f"[{self.server_name}] Error during async shutdown: {e}")
+            if current_loop == self._owning_loop:
+                await self._async_shutdown(timeout)
+            else:
+                fut = asyncio.run_coroutine_threadsafe(self._async_shutdown(timeout), self._owning_loop)
+                try:
+                    await asyncio.wrap_future(fut)
+                except Exception as e:
+                    logger.warning(f"[{self.server_name}] Error during async shutdown: {e}")
         else:
             await self._async_shutdown(timeout)
 
-        # Stop worker thread if any
+        # Stop worker thread if any (ensure thread does not attempt to join itself)
         if self._worker_thread and self._worker_thread.is_alive():
             if self._owning_loop:
                 self._owning_loop.call_soon_threadsafe(self._owning_loop.stop)
-            self._worker_thread.join(timeout=2.0)
-            self._worker_thread = None
+            if threading.current_thread() != self._worker_thread:
+                self._worker_thread.join(timeout=2.0)
+                self._worker_thread = None
 
         # Hard kill the session's specific subprocess if it is still alive
         if pid_to_kill:
@@ -533,16 +548,24 @@ class PersistentServerSession:
                 import psutil
                 if psutil.pid_exists(pid_to_kill):
                     p = psutil.Process(pid_to_kill)
-                    p.terminate()
-                    try:
-                        p.wait(timeout=1.0)
-                    except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                    # Verify process identity before terminating
+                    if getattr(self, "_proc_create_time", None):
                         try:
-                            p.kill()
-                        except (psutil.NoSuchProcess, Exception):
-                            pass
-            except Exception:
-                pass
+                            if abs(p.create_time() - self._proc_create_time) > 1e-4:
+                                p = None
+                        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                            p = None
+                    if p:
+                        p.terminate()
+                        try:
+                            p.wait(timeout=1.0)
+                        except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                            try:
+                                p.kill()
+                            except (psutil.NoSuchProcess, Exception):
+                                pass
+            except Exception as exc:
+                logger.warning(f"[{self.server_name}] Error terminating subprocess PID {pid_to_kill}: {exc}")
 
         self._state = SessionLifecycleState.CLOSED
         logger.info(f"[{self.server_name}] Shutdown complete.")
@@ -587,20 +610,31 @@ class PersistentSessionManager:
     """
     _sessions: Dict[str, PersistentServerSession] = {}
     _active_pids: set = set()
+    _active_proc_identities: Dict[int, float] = {}
     _lock = threading.RLock()
     _emergency_disabled: bool = False
     _emergency_disabled_at: Optional[str] = None
     _emergency_reason: Optional[str] = None
 
     @classmethod
-    def register_pid(cls, pid: int):
+    def register_pid(cls, pid: int, create_time: Optional[float] = None):
         with cls._lock:
             cls._active_pids.add(pid)
+            if create_time is not None:
+                cls._active_proc_identities[pid] = create_time
+            else:
+                try:
+                    import psutil
+                    if psutil.pid_exists(pid):
+                        cls._active_proc_identities[pid] = psutil.Process(pid).create_time()
+                except Exception:
+                    pass
 
     @classmethod
     def unregister_pid(cls, pid: int):
         with cls._lock:
             cls._active_pids.discard(pid)
+            cls._active_proc_identities.pop(pid, None)
 
     @classmethod
     def _fetch_authoritative_emergency_state(cls) -> Tuple[str, Optional[str], Optional[str]]:
@@ -942,6 +976,8 @@ class PersistentSessionManager:
             cls._sessions.clear()
             pids = list(cls._active_pids)
             cls._active_pids.clear()
+            proc_identities = dict(cls._active_proc_identities)
+            cls._active_proc_identities.clear()
             if clear_emergency:
                 cls._emergency_disabled = False
                 cls._emergency_disabled_at = None
@@ -953,35 +989,96 @@ class PersistentSessionManager:
             current_loop = None
 
         for s in sessions:
-            if s._owning_loop and s._owning_loop.is_running():
-                if current_loop != s._owning_loop:
+            s_owning_loop = getattr(s, "_owning_loop", None)
+            s_pid = getattr(s, "_pid", None)
+            if s_pid:
+                pids.append(s_pid)
+                s_ct = getattr(s, "_proc_create_time", None)
+                if s_ct:
+                    proc_identities[s_pid] = s_ct
+
+            if s_owning_loop and s_owning_loop.is_running():
+                if current_loop != s_owning_loop:
+                    # Owning loop is on a separate thread; safely wait on coroutine via run_coroutine_threadsafe
                     try:
-                        fut = asyncio.run_coroutine_threadsafe(s.shutdown(timeout=1.0), s._owning_loop)
+                        fut = asyncio.run_coroutine_threadsafe(s._async_shutdown(timeout=1.0), s_owning_loop)
                         fut.result(timeout=1.5)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning(f"Error awaiting shutdown for session '{s.server_id}' in reset: {exc}")
+                    # Safely join worker thread from current thread
+                    if s._worker_thread and s._worker_thread.is_alive():
+                        if threading.current_thread() != s._worker_thread:
+                            s_owning_loop.call_soon_threadsafe(s_owning_loop.stop)
+                            s._worker_thread.join(timeout=1.5)
+                            s._worker_thread = None
+                    s._state = SessionLifecycleState.CLOSED
                 else:
-                    s._owning_loop.create_task(s.shutdown(timeout=1.0))
-            if s._pid:
-                pids.append(s._pid)
+                    # reset() called from within the same event loop that owns the session.
+                    # Never synchronously block the running loop with fut.result().
+                    # Synchronously signal cancellation and mark closed.
+                    s._state = SessionLifecycleState.SHUTTING_DOWN
+                    if s._stop_event:
+                        s._stop_event.set()
+                    if s._heartbeat_task and not s._heartbeat_task.done():
+                        s._heartbeat_task.cancel()
+                    if s._runner_task and not s._runner_task.done():
+                        s._runner_task.cancel()
+                    s._state = SessionLifecycleState.CLOSED
+            else:
+                s._state = SessionLifecycleState.CLOSED
 
         # Terminate and wait on the exact owned PIDs registered with the manager
         import psutil
+        try:
+            current_proc = psutil.Process(os.getpid())
+            owned_children_pids = {c.pid for c in current_proc.children(recursive=True)}
+        except Exception:
+            owned_children_pids = set()
+
         for pid in set(pids):
             try:
-                if psutil.pid_exists(pid):
-                    p = psutil.Process(pid)
-                    p.terminate()
+                if not psutil.pid_exists(pid):
+                    continue
+                p = psutil.Process(pid)
+
+                # Process identity validation: prevent terminating unrelated process on PID reuse
+                expected_ct = proc_identities.get(pid)
+                if expected_ct is not None:
                     try:
-                        p.wait(timeout=1.0)
-                    except (psutil.TimeoutExpired, psutil.NoSuchProcess):
-                        try:
-                            p.kill()
-                            p.wait(timeout=0.5)
-                        except Exception:
-                            pass
-            except Exception:
+                        actual_ct = p.create_time()
+                        if abs(actual_ct - expected_ct) > 1e-4:
+                            logger.warning(
+                                f"Skipping termination of PID {pid}: process identity mismatch "
+                                f"(expected create_time {expected_ct}, actual {actual_ct}). "
+                                f"PID was likely reused by an unrelated process."
+                            )
+                            continue
+                    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                        continue
+                else:
+                    # If create_time was not recorded, verify process is a child/descendant of current process
+                    if pid not in owned_children_pids and p.ppid() != os.getpid():
+                        logger.warning(
+                            f"Skipping termination of PID {pid}: process is not an owned child of current process. "
+                            f"Preventing termination of potential unrelated process."
+                        )
+                        continue
+
+                p.terminate()
+                try:
+                    p.wait(timeout=1.0)
+                except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                    try:
+                        p.kill()
+                        p.wait(timeout=0.5)
+                    except (psutil.NoSuchProcess, Exception) as kill_exc:
+                        if not isinstance(kill_exc, psutil.NoSuchProcess):
+                            logger.warning(f"Error killing PID {pid}: {kill_exc}")
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 pass
+            except Exception as exc:
+                logger.warning(f"Error terminating session process PID {pid} in reset: {exc}")
+
             if hasattr(os, "waitpid") and hasattr(os, "WNOHANG"):
                 try:
                     os.waitpid(pid, os.WNOHANG)

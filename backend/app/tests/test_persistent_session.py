@@ -23,6 +23,7 @@ import asyncio
 import time
 import pytest
 import psutil
+import subprocess
 
 from app.core.config import settings
 from app.mcp.persistent_session import (
@@ -418,3 +419,97 @@ async def test_12_existing_transport_compatibility_flag(monkeypatch):
     tool_res, lat_tool = await client.call_tool("get_project_status", {"project_id": "PRJ-MUM-001"})
     parsed_name = tool_res.get("parsed", {}).get("name", "") or tool_res.get("name", "")
     assert "Mumbai Coastal Road" in parsed_name
+
+
+def test_13_reset_event_loop_and_worker_thread_safety():
+    """Scenario 13: reset() safely cleans up worker threads and same-loop sessions without blocking or deadlock."""
+    # Sub-case A: Dedicated worker thread session cleanup
+    sess_worker = PersistentServerSession(
+        server_id="worker-srv",
+        server_name="worker-srv",
+        command=sys.executable,
+        args=["-c", "import time; time.sleep(10)"]
+    )
+    sess_worker._ensure_worker_thread()
+    PersistentSessionManager._sessions["worker-srv"] = sess_worker
+
+    # reset() should stop and join worker thread cleanly without 'cannot join current thread'
+    PersistentSessionManager.reset()
+    assert sess_worker.state == SessionLifecycleState.CLOSED
+    assert sess_worker._worker_thread is None or not sess_worker._worker_thread.is_alive()
+
+    # Sub-case B: reset() called on same event loop that owns the session
+    async def run_same_loop_test():
+        loop = asyncio.get_running_loop()
+        sess_same = PersistentServerSession(
+            server_id="same-loop-srv",
+            server_name="same-loop-srv",
+            command=sys.executable,
+            args=["-c", "import time; time.sleep(10)"]
+        )
+        sess_same._owning_loop = loop
+        PersistentSessionManager._sessions["same-loop-srv"] = sess_same
+
+        # Calling reset() synchronously inside the same running loop must NOT deadlock
+        PersistentSessionManager.reset()
+        assert sess_same.state == SessionLifecycleState.CLOSED
+
+    asyncio.run(run_same_loop_test())
+
+
+def test_14_reset_pid_identity_and_reuse_safety():
+    """Scenario 14: Process identity validation prevents terminating unrelated processes on PID reuse."""
+    unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    try:
+        import psutil
+        p = psutil.Process(unrelated.pid)
+        real_ct = p.create_time()
+
+        # Simulate PID recycling: manager recorded a past create_time for this PID
+        stale_ct = real_ct - 100.0
+        PersistentSessionManager.register_pid(unrelated.pid, create_time=stale_ct)
+
+        # reset() must detect the identity mismatch and skip termination
+        PersistentSessionManager.reset()
+
+        assert unrelated.poll() is None, "Unrelated process was terminated due to stale PID collision!"
+        assert p.is_running(), "Unrelated process should still be running!"
+    finally:
+        unrelated.terminate()
+        try:
+            unrelated.wait(timeout=2.0)
+        except Exception:
+            unrelated.kill()
+
+
+def test_15_reset_cleanup_error_visibility_and_continuation(caplog):
+    """Scenario 15: Genuine cleanup errors are logged at WARNING level and subsequent cleanups continue."""
+    import logging
+    import psutil
+
+    # Ensure logger is enabled if previous test suites invoked fileConfig
+    logger = logging.getLogger("mcp-nexus.persistent-session")
+    logger.disabled = False
+
+    # Start a real child process that should be terminated
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    child_p = psutil.Process(child.pid)
+    child_ct = child_p.create_time()
+    PersistentSessionManager.register_pid(child.pid, create_time=child_ct)
+
+    # Also register a non-existent or unowned PID (PID 4 on Windows, or PID 1 on POSIX) with mismatch
+    unowned_pid = 4 if sys.platform == "win32" else 1
+    PersistentSessionManager.register_pid(unowned_pid, create_time=child_ct)
+
+    with caplog.at_level(logging.WARNING, logger="mcp-nexus.persistent-session"):
+        PersistentSessionManager.reset()
+
+    # The real child process must have been terminated despite the presence of unowned PID
+    assert child.poll() is not None or not child_p.is_running(), "Owned child was not cleaned up!"
+
+    # Verify that a warning was logged for the unowned PID identity mismatch
+    assert any(
+        f"PID {unowned_pid}" in rec.message and ("identity mismatch" in rec.message or "not an owned child" in rec.message)
+        for rec in caplog.records
+    ), f"Expected identity validation warning was not logged. Logged records: {[r.message for r in caplog.records]}"
+
