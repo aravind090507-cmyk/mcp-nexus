@@ -934,19 +934,59 @@ class PersistentSessionManager:
     def reset(cls, clear_emergency: bool = False):
         """
         Synchronous reset of local session pool.
-        Does NOT clear the global emergency kill switch by default (clear_emergency=False)
-        to prevent worker pool recycles from inadvertent disengagement.
-        Use test_harness_reset() or clear_emergency=True in isolated test fixtures.
+        Shuts down all manager-owned sessions, waits for their subprocesses to exit,
+        and clears session references safely without affecting unrelated processes.
         """
         with cls._lock:
-            for s in list(cls._sessions.values()):
-                if s._owning_loop and s._owning_loop.is_running():
-                    asyncio.run_coroutine_threadsafe(s.shutdown(timeout=1.0), s._owning_loop)
+            sessions = list(cls._sessions.values())
             cls._sessions.clear()
+            pids = list(cls._active_pids)
+            cls._active_pids.clear()
             if clear_emergency:
                 cls._emergency_disabled = False
                 cls._emergency_disabled_at = None
                 cls._emergency_reason = None
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        for s in sessions:
+            if s._owning_loop and s._owning_loop.is_running():
+                if current_loop != s._owning_loop:
+                    try:
+                        fut = asyncio.run_coroutine_threadsafe(s.shutdown(timeout=1.0), s._owning_loop)
+                        fut.result(timeout=1.5)
+                    except Exception:
+                        pass
+                else:
+                    s._owning_loop.create_task(s.shutdown(timeout=1.0))
+            if s._pid:
+                pids.append(s._pid)
+
+        # Terminate and wait on the exact owned PIDs registered with the manager
+        import psutil
+        for pid in set(pids):
+            try:
+                if psutil.pid_exists(pid):
+                    p = psutil.Process(pid)
+                    p.terminate()
+                    try:
+                        p.wait(timeout=1.0)
+                    except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                        try:
+                            p.kill()
+                            p.wait(timeout=0.5)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            if hasattr(os, "waitpid") and hasattr(os, "WNOHANG"):
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except (ChildProcessError, OSError):
+                    pass
 
     @classmethod
     def test_harness_reset(cls):

@@ -46,14 +46,6 @@ def cleanup_sessions():
     PersistentSessionManager.reset()
     yield
     PersistentSessionManager.reset()
-    if hasattr(os, "waitpid"):
-        try:
-            while True:
-                wpid, _ = os.waitpid(-1, os.WNOHANG)
-                if wpid <= 0:
-                    break
-        except Exception:
-            pass
 
 
 @pytest.mark.asyncio
@@ -331,47 +323,78 @@ async def test_10_application_shutdown():
 
 @pytest.mark.asyncio
 async def test_11_zero_zombie_subprocesses():
-    """Scenario 11: Subprocess cleanup guarantees zero zombie/orphan child processes."""
-    proc = psutil.Process()
-    
-    # Ensure clean process slate prior to testing zombie subprocess cleanup
-    for child in proc.children(recursive=True):
-        if "conhost" not in child.name().lower():
+    """
+    Scenario 11: Subprocess cleanup guarantees zero zombie/orphan child processes
+    for test-owned sessions without touching unrelated external processes.
+    """
+    # 1. Capture baseline pre-existing process IDs
+    try:
+        pre_existing_pids = {c.pid for c in psutil.Process().children(recursive=True)}
+    except Exception:
+        pre_existing_pids = set()
+
+    owned_pid = None
+    owned_proc = None
+    try:
+        # 2. Execute tool to launch test-owned persistent session subprocess
+        res, _ = await PersistentSessionManager.execute_tool(
+            "srv-erp-zombie", "ERP", sys.executable, [ERP_SCRIPT], {}, os.getcwd(),
+            "get_project_status", {"project_id": "PRJ-MUM-001"}
+        )
+        assert "Mumbai" in res.get("name", "")
+
+        # 3. Retain exact process handle and PID owned by this test
+        session = PersistentSessionManager.get_existing_session("srv-erp-zombie")
+        assert session is not None, "Persistent session must be registered in manager"
+        owned_pid = session.pid
+        assert owned_pid is not None, "Persistent session must have an active subprocess PID"
+        assert owned_pid not in pre_existing_pids, "Owned PID must be a newly spawned subprocess"
+        assert psutil.pid_exists(owned_pid), f"Owned PID {owned_pid} must be running"
+
+        owned_proc = psutil.Process(owned_pid)
+        assert owned_proc.is_running(), f"Owned process {owned_pid} must be active"
+        assert owned_proc.status() != psutil.STATUS_ZOMBIE, f"Owned process {owned_pid} must not be a zombie"
+
+        # 4. Exercise actual session shutdown
+        await PersistentSessionManager.shutdown_all(timeout=3.0)
+
+        # 5. Wait for the owned subprocess to exit
+        try:
+            owned_proc.wait(timeout=3.0)
+        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+            pass
+
+        if hasattr(os, "waitpid") and hasattr(os, "WNOHANG"):
             try:
-                child.kill()
-                child.wait(timeout=1.0)
+                os.waitpid(owned_pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                pass
+
+        # 6. Verify that the test-owned process is no longer running and no zombie remains
+        assert not owned_proc.is_running(), f"Process {owned_pid} should not be running after shutdown"
+        assert not psutil.pid_exists(owned_pid), f"PID {owned_pid} should not exist in process table after shutdown"
+
+        # 7. Verify pre-existing processes were untouched
+        for pid in pre_existing_pids:
+            if psutil.pid_exists(pid):
+                p = psutil.Process(pid)
+                # Ensure pre-existing processes were not killed by our shutdown
+                assert p.is_running(), f"Pre-existing process {pid} must not be terminated"
+
+    finally:
+        # 8. Guaranteed cleanup strictly for test-owned process
+        if owned_pid and psutil.pid_exists(owned_pid):
+            try:
+                p = psutil.Process(owned_pid)
+                p.kill()
+                p.wait(timeout=1.0)
             except Exception:
                 pass
-    if hasattr(os, "waitpid"):
-        try:
-            while True:
-                wpid, _ = os.waitpid(-1, os.WNOHANG)
-                if wpid <= 0:
-                    break
-        except Exception:
-            pass
-
-    await PersistentSessionManager.execute_tool(
-        "srv-erp-zombie", "ERP", sys.executable, [ERP_SCRIPT], {}, os.getcwd(),
-        "get_project_status", {"project_id": "PRJ-MUM-001"}
-    )
-    children_during = [c for c in proc.children(recursive=True) if "conhost" not in c.name().lower()]
-    assert len(children_during) >= 1
-
-    await PersistentSessionManager.shutdown_all(timeout=3.0)
-    await asyncio.sleep(0.5)
-
-    if hasattr(os, "waitpid"):
-        try:
-            while True:
-                wpid, _ = os.waitpid(-1, os.WNOHANG)
-                if wpid <= 0:
-                    break
-        except Exception:
-            pass
-
-    children_after = [c for c in proc.children(recursive=True) if "conhost" not in c.name().lower()]
-    assert len(children_after) == 0, f"Expected 0 child processes after shutdown, found: {children_after}"
+            if hasattr(os, "waitpid") and hasattr(os, "WNOHANG"):
+                try:
+                    os.waitpid(owned_pid, os.WNOHANG)
+                except (ChildProcessError, OSError):
+                    pass
 
 
 @pytest.mark.asyncio

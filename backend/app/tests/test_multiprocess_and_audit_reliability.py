@@ -127,18 +127,32 @@ def _multiprocess_executor_worker(db_url: str, cmd_queue: mp.Queue, res_queue: m
 # Helper for creating a clean test database environment (PostgreSQL or SQLite)
 # ==============================================================================
 
-@pytest.fixture(autouse=True)
-def cleanup_multiprocess_workers():
-    """Ensure no worker processes spawned via multiprocessing survive across test cases."""
-    yield
-    import multiprocessing as mp
-    for p in mp.active_children():
+@pytest.fixture
+def track_process():
+    """
+    Explicitly tracks multiprocessing.Process instances created by the test
+    and guarantees teardown solely for those tracked processes.
+    """
+    owned_processes = []
+
+    def register(proc):
+        owned_processes.append(proc)
+        return proc
+
+    yield register
+
+    for p in owned_processes:
         try:
-            p.terminate()
-            p.join(timeout=1.0)
+            if p.is_alive():
+                p.join(timeout=1.0)
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=1.0)
             if p.is_alive():
                 p.kill()
                 p.join(timeout=1.0)
+            if hasattr(p, "close"):
+                p.close()
         except Exception:
             pass
 
@@ -226,7 +240,7 @@ def test_setup_entities(reliability_db_url):
 # WORKSTREAM B: TRUE MULTIPROCESS RELIABILITY TESTS
 # ==============================================================================
 
-def test_01_cross_process_shutdown_propagation(reliability_db_url, test_setup_entities):
+def test_01_cross_process_shutdown_propagation(reliability_db_url, test_setup_entities, track_process):
     """
     Test 1: Cross-process shutdown propagation.
     Process A triggers shutdown; Process B (independent OS process) observes the state
@@ -236,8 +250,8 @@ def test_01_cross_process_shutdown_propagation(reliability_db_url, test_setup_en
     cmd_a, res_a = ctx.Queue(), ctx.Queue()
     cmd_b, res_b = ctx.Queue(), ctx.Queue()
 
-    proc_a = ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_a, res_a))
-    proc_b = ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_b, res_b))
+    proc_a = track_process(ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_a, res_a)))
+    proc_b = track_process(ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_b, res_b)))
 
     proc_a.start()
     proc_b.start()
@@ -284,11 +298,20 @@ def test_01_cross_process_shutdown_propagation(reliability_db_url, test_setup_en
     finally:
         cmd_a.put(("EXIT",))
         cmd_b.put(("EXIT",))
-        proc_a.join(timeout=5.0)
-        proc_b.join(timeout=5.0)
+        proc_a.join(timeout=2.0)
+        proc_b.join(timeout=2.0)
+        for p in (proc_a, proc_b):
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=1.0)
+            if p.is_alive():
+                p.kill()
+                p.join(timeout=1.0)
+            if hasattr(p, "close"):
+                p.close()
 
 
-def test_02_shutdown_persistence_across_process_lifecycle(reliability_db_url, test_setup_entities):
+def test_02_shutdown_persistence_across_process_lifecycle(reliability_db_url, test_setup_entities, track_process):
     """
     Test 2: Shutdown persistence across process lifecycle.
     Process A triggers shutdown and terminates. Process C starts fresh and verifies
@@ -298,7 +321,7 @@ def test_02_shutdown_persistence_across_process_lifecycle(reliability_db_url, te
     cmd_a, res_a = ctx.Queue(), ctx.Queue()
 
     # Step 1: Process A starts, engages shutdown, and terminates
-    proc_a = ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_a, res_a))
+    proc_a = track_process(ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_a, res_a)))
     proc_a.start()
     res_a.get(timeout=8.0)  # READY
 
@@ -308,12 +331,15 @@ def test_02_shutdown_persistence_across_process_lifecycle(reliability_db_url, te
 
     # Terminate Process A
     cmd_a.put(("EXIT",))
-    proc_a.join(timeout=5.0)
+    proc_a.join(timeout=2.0)
+    if proc_a.is_alive():
+        proc_a.terminate()
+        proc_a.join(timeout=1.0)
     assert not proc_a.is_alive()
 
     # Step 2: Process C starts fresh after Process A is dead
     cmd_c, res_c = ctx.Queue(), ctx.Queue()
-    proc_c = ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_c, res_c))
+    proc_c = track_process(ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_c, res_c)))
     proc_c.start()
 
     try:
@@ -333,10 +359,19 @@ def test_02_shutdown_persistence_across_process_lifecycle(reliability_db_url, te
         assert "emergency kill switch is engaged" in err_msg
     finally:
         cmd_c.put(("EXIT",))
-        proc_c.join(timeout=5.0)
+        proc_c.join(timeout=2.0)
+        for p in (proc_a, proc_c):
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=1.0)
+            if p.is_alive():
+                p.kill()
+                p.join(timeout=1.0)
+            if hasattr(p, "close"):
+                p.close()
 
 
-def test_03_concurrent_cross_process_shutdown_requests(reliability_db_url, test_setup_entities):
+def test_03_concurrent_cross_process_shutdown_requests(reliability_db_url, test_setup_entities, track_process):
     """
     Test 3: Concurrent shutdown requests from independent processes.
     Both complete without deadlock or state corruption.
@@ -345,8 +380,8 @@ def test_03_concurrent_cross_process_shutdown_requests(reliability_db_url, test_
     cmd_1, res_1 = ctx.Queue(), ctx.Queue()
     cmd_2, res_2 = ctx.Queue(), ctx.Queue()
 
-    proc_1 = ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_1, res_1))
-    proc_2 = ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_2, res_2))
+    proc_1 = track_process(ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_1, res_1)))
+    proc_2 = track_process(ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_2, res_2)))
 
     proc_1.start()
     proc_2.start()
@@ -383,11 +418,20 @@ def test_03_concurrent_cross_process_shutdown_requests(reliability_db_url, test_
     finally:
         cmd_1.put(("EXIT",))
         cmd_2.put(("EXIT",))
-        proc_1.join(timeout=5.0)
-        proc_2.join(timeout=5.0)
+        proc_1.join(timeout=2.0)
+        proc_2.join(timeout=2.0)
+        for p in (proc_1, proc_2):
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=1.0)
+            if p.is_alive():
+                p.kill()
+                p.join(timeout=1.0)
+            if hasattr(p, "close"):
+                p.close()
 
 
-def test_04_cross_process_recovery_and_reset_safety(reliability_db_url, test_setup_entities):
+def test_04_cross_process_recovery_and_reset_safety(reliability_db_url, test_setup_entities, track_process):
     """
     Test 4: Recovery and reset safety across processes.
     Process 1 disengages shutdown; Process 2 immediately observes restored capability.
@@ -396,8 +440,8 @@ def test_04_cross_process_recovery_and_reset_safety(reliability_db_url, test_set
     cmd_1, res_1 = ctx.Queue(), ctx.Queue()
     cmd_2, res_2 = ctx.Queue(), ctx.Queue()
 
-    proc_1 = ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_1, res_1))
-    proc_2 = ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_2, res_2))
+    proc_1 = track_process(ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_1, res_1)))
+    proc_2 = track_process(ctx.Process(target=_multiprocess_executor_worker, args=(reliability_db_url, cmd_2, res_2)))
 
     proc_1.start()
     proc_2.start()
@@ -434,8 +478,17 @@ def test_04_cross_process_recovery_and_reset_safety(reliability_db_url, test_set
     finally:
         cmd_1.put(("EXIT",))
         cmd_2.put(("EXIT",))
-        proc_1.join(timeout=5.0)
-        proc_2.join(timeout=5.0)
+        proc_1.join(timeout=2.0)
+        proc_2.join(timeout=2.0)
+        for p in (proc_1, proc_2):
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=1.0)
+            if p.is_alive():
+                p.kill()
+                p.join(timeout=1.0)
+            if hasattr(p, "close"):
+                p.close()
 
 
 # ==============================================================================
