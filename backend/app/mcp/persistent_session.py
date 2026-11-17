@@ -544,31 +544,51 @@ class PersistentServerSession:
 
         # Hard kill the session's specific subprocess if it is still alive
         if pid_to_kill:
-            try:
-                import psutil
-                if psutil.pid_exists(pid_to_kill):
-                    p = psutil.Process(pid_to_kill)
-                    # Verify process identity before terminating
-                    if getattr(self, "_proc_create_time", None):
-                        try:
-                            if abs(p.create_time() - self._proc_create_time) > 1e-4:
-                                p = None
-                        except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                            p = None
-                    if p:
-                        p.terminate()
-                        try:
-                            p.wait(timeout=1.0)
-                        except (psutil.TimeoutExpired, psutil.NoSuchProcess):
-                            try:
-                                p.kill()
-                            except (psutil.NoSuchProcess, Exception):
-                                pass
-            except Exception as exc:
-                logger.warning(f"[{self.server_name}] Error terminating subprocess PID {pid_to_kill}: {exc}")
+            self._sync_terminate_subprocess(pid_to_kill)
 
         self._state = SessionLifecycleState.CLOSED
         logger.info(f"[{self.server_name}] Shutdown complete.")
+
+    def _sync_terminate_subprocess(self, pid: int):
+        """Synchronously terminates, kills, and reaps a session subprocess with identity validation."""
+        import psutil
+        try:
+            if not psutil.pid_exists(pid):
+                return
+            p = psutil.Process(pid)
+            if getattr(self, "_proc_create_time", None):
+                try:
+                    if abs(p.create_time() - self._proc_create_time) > 1e-4:
+                        logger.warning(
+                            f"[{self.server_name}] Skipping termination of PID {pid}: "
+                            f"process identity mismatch (expected create_time {self._proc_create_time}, "
+                            f"actual {p.create_time()})."
+                        )
+                        return
+                except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                    return
+
+            p.terminate()
+            try:
+                p.wait(timeout=1.0)
+            except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                try:
+                    p.kill()
+                    p.wait(timeout=0.5)
+                except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                    pass
+                except Exception as kill_exc:
+                    logger.warning(f"[{self.server_name}] Error killing PID {pid}: {kill_exc}")
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            pass
+        except Exception as exc:
+            logger.warning(f"[{self.server_name}] Unexpected error terminating subprocess PID {pid}: {exc}")
+
+        if hasattr(os, "waitpid") and hasattr(os, "WNOHANG"):
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                pass
 
     async def _async_shutdown(self, timeout: float):
         target_pid = self._pid
@@ -578,38 +598,25 @@ class PersistentServerSession:
             self._heartbeat_task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(self._heartbeat_task), timeout=0.5)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
+            except Exception as exc:
+                logger.warning(f"[{self.server_name}] Unexpected error during heartbeat task shutdown: {exc}")
         if self._runner_task and not self._runner_task.done():
             self._runner_task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(self._runner_task), timeout=timeout)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
+            except Exception as exc:
+                logger.warning(f"[{self.server_name}] Unexpected error during runner task shutdown: {exc}")
 
         pid_to_clean = target_pid or self._pid
         if pid_to_clean:
             try:
-                import psutil
-                if psutil.pid_exists(pid_to_clean):
-                    p = psutil.Process(pid_to_clean)
-                    if getattr(self, "_proc_create_time", None):
-                        try:
-                            if abs(p.create_time() - self._proc_create_time) > 1e-4:
-                                p = None
-                        except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                            p = None
-                    if p:
-                        p.terminate()
-                        try:
-                            p.wait(timeout=1.0)
-                        except (psutil.TimeoutExpired, psutil.NoSuchProcess):
-                            try:
-                                p.kill()
-                            except (psutil.NoSuchProcess, Exception):
-                                pass
-            except Exception:
-                pass
+                await asyncio.to_thread(self._sync_terminate_subprocess, pid_to_clean)
+            except Exception as exc:
+                logger.warning(f"[{self.server_name}] Error during async subprocess termination for PID {pid_to_clean}: {exc}")
 
 
 class PersistentSessionManager:
@@ -950,28 +957,19 @@ class PersistentSessionManager:
             cls._sessions.clear()
             pids_to_clean = list(cls._active_pids)
             cls._active_pids.clear()
+            proc_identities = dict(cls._active_proc_identities)
+            cls._active_proc_identities.clear()
 
         if sessions:
             logger.info(f"Shutting down {len(sessions)} persistent MCP server session(s)...")
             tasks = [s.shutdown(timeout=timeout) for s in sessions]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for s, res in zip(sessions, results):
+                if isinstance(res, Exception) and not isinstance(res, (asyncio.CancelledError, asyncio.TimeoutError)):
+                    logger.warning(f"[{s.server_name}] Error during session shutdown in shutdown_all: {res}")
 
-        # Forcefully terminate and reap any surviving persistent session subprocesses
-        for pid in pids_to_clean:
-            try:
-                import psutil
-                if psutil.pid_exists(pid):
-                    p = psutil.Process(pid)
-                    p.terminate()
-                    try:
-                        p.wait(timeout=1.0)
-                    except (psutil.TimeoutExpired, psutil.NoSuchProcess):
-                        try:
-                            p.kill()
-                        except (psutil.NoSuchProcess, Exception):
-                            pass
-            except Exception:
-                pass
+        # Forcefully terminate and reap any surviving persistent session subprocesses off the event loop
+        await asyncio.to_thread(cls._cleanup_pids, pids_to_clean, proc_identities)
 
         logger.info("All persistent MCP server sessions cleanly shutdown.")
 
@@ -1137,25 +1135,33 @@ class PersistentSessionManager:
         # Gracefully await shutdown on all sessions without blocking the event loop
         if sessions:
             tasks = [s.shutdown(timeout=timeout) for s in sessions]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for s, res in zip(sessions, results):
+                if isinstance(res, Exception) and not isinstance(res, (asyncio.CancelledError, asyncio.TimeoutError)):
+                    logger.warning(f"[{s.server_name}] Error during session shutdown in async_reset: {res}")
 
         # Confirm all sessions are CLOSED and background tasks are fully done
         for s in sessions:
             if s._runner_task and not s._runner_task.done():
                 try:
                     await asyncio.wait_for(s._runner_task, timeout=1.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                except (asyncio.TimeoutError, asyncio.CancelledError):
                     pass
+                except Exception as exc:
+                    logger.warning(f"[{s.server_name}] Unexpected error in runner task during async_reset: {exc}")
             if s._heartbeat_task and not s._heartbeat_task.done():
                 try:
                     await asyncio.wait_for(s._heartbeat_task, timeout=1.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                except (asyncio.TimeoutError, asyncio.CancelledError):
                     pass
+                except Exception as exc:
+                    logger.warning(f"[{s.server_name}] Unexpected error in heartbeat task during async_reset: {exc}")
             s._state = SessionLifecycleState.CLOSED
             s._session = None
 
         # Terminate and wait on the exact owned PIDs registered with the manager
-        cls._cleanup_pids(pids, proc_identities)
+        # Offload synchronous PID cleanup to thread pool so event loop remains responsive
+        await asyncio.to_thread(cls._cleanup_pids, pids, proc_identities)
 
     @classmethod
     def test_harness_reset(cls):

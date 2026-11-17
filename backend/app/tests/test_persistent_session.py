@@ -515,8 +515,12 @@ def test_15_reset_cleanup_error_visibility_and_continuation(caplog):
 
 
 @pytest.mark.asyncio
-async def test_16_async_reset_same_event_loop_lifecycle_completion():
-    """Scenario 16: Awaited async_reset() on the owning event loop finishes tasks, reaps subprocess, and confirms CLOSED."""
+async def test_16_async_reset_same_event_loop_lifecycle_completion(caplog):
+    """Scenario 16: Awaited async_reset() on owning event loop finishes tasks, reaps subprocess without blocking loop responsiveness."""
+    import logging
+    logger = logging.getLogger("mcp-nexus.persistent-session")
+    logger.disabled = False
+
     sess = PersistentServerSession(
         server_id="async-reset-srv",
         server_name="async-reset-srv",
@@ -534,22 +538,60 @@ async def test_16_async_reset_same_event_loop_lifecycle_completion():
     # Register session in manager
     PersistentSessionManager._sessions["async-reset-srv"] = sess
 
-    # Execute awaited reset on the owning event loop without deadlock
-    await PersistentSessionManager.async_reset()
+    # Register an invalid/unowned PID to verify failure observability without aborting cleanup
+    unowned_pid = 4 if sys.platform == "win32" else 1
+    PersistentSessionManager.register_pid(unowned_pid, create_time=sess._proc_create_time)
 
-    # 1. Background tasks are actually finished
+    # Concurrently run an event loop responsiveness ticker to prove the loop remains unblocked
+    loop_ticks = 0
+    stop_ticker = False
+
+    async def _ticker():
+        nonlocal loop_ticks
+        while not stop_ticker:
+            loop_ticks += 1
+            await asyncio.sleep(0.01)
+
+    ticker_task = asyncio.create_task(_ticker())
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="mcp-nexus.persistent-session"):
+            # Execute awaited reset on the owning event loop without deadlock or blocking
+            await PersistentSessionManager.async_reset(timeout=2.0)
+    finally:
+        stop_ticker = True
+        await ticker_task
+
+    # 1. Event loop remained responsive during subprocess shutdown
+    assert loop_ticks > 0, f"Event loop was blocked during async_reset! Ticks: {loop_ticks}"
+
+    # 2. Background tasks are actually finished
     assert sess._runner_task.done(), "Runner task must be done after awaited reset"
     if sess._heartbeat_task:
         assert sess._heartbeat_task.done(), "Heartbeat task must be done after awaited reset"
 
-    # 2. Session resources are released and lifecycle confirmed CLOSED
+    # 3. Session resources are released and lifecycle confirmed CLOSED
     assert sess.state == SessionLifecycleState.CLOSED, "Session state must be confirmed CLOSED"
     assert sess._session is None, "ClientSession resource must be cleared"
     assert "async-reset-srv" not in PersistentSessionManager._sessions
 
-    # 3. Subprocess has exited before the awaited reset operation returns
-    assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE, (
-        f"Subprocess PID {pid} must have exited before async_reset() returns"
-    )
+    # 4. Subprocess is fully reaped (not a zombie process)
+    if psutil.pid_exists(pid):
+        proc = psutil.Process(pid)
+        zombie_status = getattr(psutil, "STATUS_ZOMBIE", "zombie")
+        assert proc.status() != zombie_status, f"Subprocess PID {pid} is a zombie process!"
+        if getattr(sess, "_proc_create_time", None):
+            try:
+                assert abs(proc.create_time() - sess._proc_create_time) > 1e-4, (
+                    f"Subprocess PID {pid} was not terminated/reaped!"
+                )
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                pass
+
+    # 5. Failures/mismatches remain observable in logs and do not abort cleanup
+    assert any(
+        f"PID {unowned_pid}" in rec.message and ("identity mismatch" in rec.message or "not an owned child" in rec.message)
+        for rec in caplog.records
+    ), f"Expected identity validation warning was not logged for PID {unowned_pid}. Records: {[r.message for r in caplog.records]}"
 
 
