@@ -576,11 +576,15 @@ class PersistentServerSession:
             self._stop_event.set()
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(self._heartbeat_task), timeout=0.5)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
         if self._runner_task and not self._runner_task.done():
             self._runner_task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(self._runner_task), timeout=timeout)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 pass
 
         pid_to_clean = target_pid or self._pid
@@ -589,14 +593,21 @@ class PersistentServerSession:
                 import psutil
                 if psutil.pid_exists(pid_to_clean):
                     p = psutil.Process(pid_to_clean)
-                    p.terminate()
-                    try:
-                        p.wait(timeout=1.0)
-                    except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                    if getattr(self, "_proc_create_time", None):
                         try:
-                            p.kill()
-                        except (psutil.NoSuchProcess, Exception):
-                            pass
+                            if abs(p.create_time() - self._proc_create_time) > 1e-4:
+                                p = None
+                        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                            p = None
+                    if p:
+                        p.terminate()
+                        try:
+                            p.wait(timeout=1.0)
+                        except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                            try:
+                                p.kill()
+                            except (psutil.NoSuchProcess, Exception):
+                                pass
             except Exception:
                 pass
 
@@ -965,69 +976,8 @@ class PersistentSessionManager:
         logger.info("All persistent MCP server sessions cleanly shutdown.")
 
     @classmethod
-    def reset(cls, clear_emergency: bool = False):
-        """
-        Synchronous reset of local session pool.
-        Shuts down all manager-owned sessions, waits for their subprocesses to exit,
-        and clears session references safely without affecting unrelated processes.
-        """
-        with cls._lock:
-            sessions = list(cls._sessions.values())
-            cls._sessions.clear()
-            pids = list(cls._active_pids)
-            cls._active_pids.clear()
-            proc_identities = dict(cls._active_proc_identities)
-            cls._active_proc_identities.clear()
-            if clear_emergency:
-                cls._emergency_disabled = False
-                cls._emergency_disabled_at = None
-                cls._emergency_reason = None
-
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            current_loop = None
-
-        for s in sessions:
-            s_owning_loop = getattr(s, "_owning_loop", None)
-            s_pid = getattr(s, "_pid", None)
-            if s_pid:
-                pids.append(s_pid)
-                s_ct = getattr(s, "_proc_create_time", None)
-                if s_ct:
-                    proc_identities[s_pid] = s_ct
-
-            if s_owning_loop and s_owning_loop.is_running():
-                if current_loop != s_owning_loop:
-                    # Owning loop is on a separate thread; safely wait on coroutine via run_coroutine_threadsafe
-                    try:
-                        fut = asyncio.run_coroutine_threadsafe(s._async_shutdown(timeout=1.0), s_owning_loop)
-                        fut.result(timeout=1.5)
-                    except Exception as exc:
-                        logger.warning(f"Error awaiting shutdown for session '{s.server_id}' in reset: {exc}")
-                    # Safely join worker thread from current thread
-                    if s._worker_thread and s._worker_thread.is_alive():
-                        if threading.current_thread() != s._worker_thread:
-                            s_owning_loop.call_soon_threadsafe(s_owning_loop.stop)
-                            s._worker_thread.join(timeout=1.5)
-                            s._worker_thread = None
-                    s._state = SessionLifecycleState.CLOSED
-                else:
-                    # reset() called from within the same event loop that owns the session.
-                    # Never synchronously block the running loop with fut.result().
-                    # Synchronously signal cancellation and mark closed.
-                    s._state = SessionLifecycleState.SHUTTING_DOWN
-                    if s._stop_event:
-                        s._stop_event.set()
-                    if s._heartbeat_task and not s._heartbeat_task.done():
-                        s._heartbeat_task.cancel()
-                    if s._runner_task and not s._runner_task.done():
-                        s._runner_task.cancel()
-                    s._state = SessionLifecycleState.CLOSED
-            else:
-                s._state = SessionLifecycleState.CLOSED
-
-        # Terminate and wait on the exact owned PIDs registered with the manager
+    def _cleanup_pids(cls, pids: List[int], proc_identities: Dict[int, float]):
+        """Terminates and waits on registered owned PIDs with identity validation."""
         import psutil
         try:
             current_proc = psutil.Process(os.getpid())
@@ -1086,9 +1036,151 @@ class PersistentSessionManager:
                     pass
 
     @classmethod
+    def reset(cls, clear_emergency: bool = False):
+        """
+        Synchronous reset of local session pool.
+        Shuts down all manager-owned sessions, waits for their subprocesses to exit,
+        and clears session references safely without affecting unrelated processes.
+        """
+        with cls._lock:
+            sessions = list(cls._sessions.values())
+            cls._sessions.clear()
+            pids = list(cls._active_pids)
+            cls._active_pids.clear()
+            proc_identities = dict(cls._active_proc_identities)
+            cls._active_proc_identities.clear()
+            if clear_emergency:
+                cls._emergency_disabled = False
+                cls._emergency_disabled_at = None
+                cls._emergency_reason = None
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        for s in sessions:
+            s_owning_loop = getattr(s, "_owning_loop", None)
+            s_pid = getattr(s, "_pid", None)
+            if s_pid:
+                pids.append(s_pid)
+                s_ct = getattr(s, "_proc_create_time", None)
+                if s_ct:
+                    proc_identities[s_pid] = s_ct
+
+            if s_owning_loop and s_owning_loop.is_running():
+                if current_loop != s_owning_loop:
+                    # Owning loop is on a separate thread; safely wait on coroutine via run_coroutine_threadsafe
+                    try:
+                        fut = asyncio.run_coroutine_threadsafe(s._async_shutdown(timeout=1.0), s_owning_loop)
+                        fut.result(timeout=1.5)
+                    except Exception as exc:
+                        logger.warning(f"Error awaiting shutdown for session '{s.server_id}' in reset: {exc}")
+                    # Safely join worker thread from current thread
+                    if s._worker_thread and s._worker_thread.is_alive():
+                        if threading.current_thread() != s._worker_thread:
+                            s_owning_loop.call_soon_threadsafe(s_owning_loop.stop)
+                            s._worker_thread.join(timeout=1.5)
+                            s._worker_thread = None
+                    s._state = SessionLifecycleState.CLOSED
+                else:
+                    # reset() called synchronously from within the same event loop that owns the session.
+                    # Never synchronously block the running loop with fut.result().
+                    s._state = SessionLifecycleState.SHUTTING_DOWN
+                    if s._stop_event:
+                        s._stop_event.set()
+                    if s._heartbeat_task and not s._heartbeat_task.done():
+                        s._heartbeat_task.cancel()
+                    if s._runner_task and not s._runner_task.done():
+                        s._runner_task.cancel()
+
+                    # Do not report CLOSED merely because cancellation was requested if tasks are still running.
+                    tasks_done = (
+                        (s._runner_task is None or s._runner_task.done()) and
+                        (s._heartbeat_task is None or s._heartbeat_task.done())
+                    )
+                    if tasks_done:
+                        s._state = SessionLifecycleState.CLOSED
+            else:
+                s._state = SessionLifecycleState.CLOSED
+
+        # Terminate and wait on the exact owned PIDs registered with the manager
+        cls._cleanup_pids(pids, proc_identities)
+
+    @classmethod
+    async def async_reset(cls, clear_emergency: bool = False, timeout: float = 3.0):
+        """
+        Asynchronous reset of local session pool for callers running inside an event loop.
+        Gracefully awaits shutdown of all manager-owned sessions, ensures their background tasks
+        and subprocesses have completely terminated, and clears session references safely.
+        """
+        with cls._lock:
+            sessions = list(cls._sessions.values())
+            cls._sessions.clear()
+            pids = list(cls._active_pids)
+            cls._active_pids.clear()
+            proc_identities = dict(cls._active_proc_identities)
+            cls._active_proc_identities.clear()
+            if clear_emergency:
+                cls._emergency_disabled = False
+                cls._emergency_disabled_at = None
+                cls._emergency_reason = None
+
+        for s in sessions:
+            s_pid = getattr(s, "_pid", None)
+            if s_pid:
+                pids.append(s_pid)
+                s_ct = getattr(s, "_proc_create_time", None)
+                if s_ct:
+                    proc_identities[s_pid] = s_ct
+
+        # Gracefully await shutdown on all sessions without blocking the event loop
+        if sessions:
+            tasks = [s.shutdown(timeout=timeout) for s in sessions]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Confirm all sessions are CLOSED and background tasks are fully done
+        for s in sessions:
+            if s._runner_task and not s._runner_task.done():
+                try:
+                    await asyncio.wait_for(s._runner_task, timeout=1.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+            if s._heartbeat_task and not s._heartbeat_task.done():
+                try:
+                    await asyncio.wait_for(s._heartbeat_task, timeout=1.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+            s._state = SessionLifecycleState.CLOSED
+            s._session = None
+
+        # Terminate and wait on the exact owned PIDs registered with the manager
+        cls._cleanup_pids(pids, proc_identities)
+
+    @classmethod
     def test_harness_reset(cls):
         """Dedicated test harness reset that clears both local sessions and emergency state in memory & DB."""
         cls.reset(clear_emergency=True)
+        try:
+            from app.database.session import SessionLocal
+            from app.models.all_models import IntegrationConfig
+            db = SessionLocal()
+            try:
+                config = db.query(IntegrationConfig).filter(
+                    IntegrationConfig.name == "GLOBAL_EMERGENCY_KILL_SWITCH"
+                ).first()
+                if config:
+                    db.delete(config)
+                    db.commit()
+            finally:
+                db.close()
+        except Exception:
+            pass
+
+    @classmethod
+    async def test_harness_async_reset(cls):
+        """Dedicated async test harness reset for async callers."""
+        await cls.async_reset(clear_emergency=True)
         try:
             from app.database.session import SessionLocal
             from app.models.all_models import IntegrationConfig

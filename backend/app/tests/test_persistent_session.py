@@ -452,7 +452,7 @@ def test_13_reset_event_loop_and_worker_thread_safety():
 
         # Calling reset() synchronously inside the same running loop must NOT deadlock
         PersistentSessionManager.reset()
-        assert sess_same.state == SessionLifecycleState.CLOSED
+        assert sess_same.state in (SessionLifecycleState.SHUTTING_DOWN, SessionLifecycleState.CLOSED)
 
     asyncio.run(run_same_loop_test())
 
@@ -512,4 +512,44 @@ def test_15_reset_cleanup_error_visibility_and_continuation(caplog):
         f"PID {unowned_pid}" in rec.message and ("identity mismatch" in rec.message or "not an owned child" in rec.message)
         for rec in caplog.records
     ), f"Expected identity validation warning was not logged. Logged records: {[r.message for r in caplog.records]}"
+
+
+@pytest.mark.asyncio
+async def test_16_async_reset_same_event_loop_lifecycle_completion():
+    """Scenario 16: Awaited async_reset() on the owning event loop finishes tasks, reaps subprocess, and confirms CLOSED."""
+    sess = PersistentServerSession(
+        server_id="async-reset-srv",
+        server_name="async-reset-srv",
+        command=sys.executable,
+        args=[ERP_SCRIPT]
+    )
+    ok = await sess.start()
+    assert ok is True
+    assert sess.state == SessionLifecycleState.WARM
+    assert sess.pid is not None
+    pid = sess.pid
+    assert psutil.pid_exists(pid)
+    assert sess._runner_task is not None and not sess._runner_task.done()
+
+    # Register session in manager
+    PersistentSessionManager._sessions["async-reset-srv"] = sess
+
+    # Execute awaited reset on the owning event loop without deadlock
+    await PersistentSessionManager.async_reset()
+
+    # 1. Background tasks are actually finished
+    assert sess._runner_task.done(), "Runner task must be done after awaited reset"
+    if sess._heartbeat_task:
+        assert sess._heartbeat_task.done(), "Heartbeat task must be done after awaited reset"
+
+    # 2. Session resources are released and lifecycle confirmed CLOSED
+    assert sess.state == SessionLifecycleState.CLOSED, "Session state must be confirmed CLOSED"
+    assert sess._session is None, "ClientSession resource must be cleared"
+    assert "async-reset-srv" not in PersistentSessionManager._sessions
+
+    # 3. Subprocess has exited before the awaited reset operation returns
+    assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE, (
+        f"Subprocess PID {pid} must have exited before async_reset() returns"
+    )
+
 
